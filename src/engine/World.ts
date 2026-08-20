@@ -28,7 +28,7 @@ export class World {
 
   enabled = true;
 
-  private readonly components = new Map<Function, Component>();
+  private readonly components = new Map<object, Component>();
 
   private readonly resizeObserver: ResizeObserver;
 
@@ -126,7 +126,7 @@ export class World {
   /**
    * Gets an existing component from this world.
    */
-  get<T extends Component>(ComponentType: ComponentConstructor<T, any[]>): T {
+  get<T extends Component>(ComponentType: ComponentConstructor<T, never[]>): T {
     const component = this.components.get(ComponentType);
 
     if (!component) {
@@ -142,7 +142,7 @@ export class World {
    * Returns true if the world contains this component.
    */
   has<T extends Component>(
-    ComponentType: ComponentConstructor<T, any[]>,
+    ComponentType: ComponentConstructor<T, never[]>,
   ): boolean {
     return this.components.has(ComponentType);
   }

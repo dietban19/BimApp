@@ -2,8 +2,11 @@ import type { World } from './World';
 
 export abstract class Component {
   enabled = true;
+  protected readonly world: World;
 
-  constructor(protected readonly world: World) {}
+  constructor(world: World) {
+    this.world = world;
+  }
 
   /**
    * Called once when the component is added to a world.

@@ -18,6 +18,12 @@ export class World {
   readonly renderer: THREE.WebGLRenderer;
 
   /**
+   * Optional camera override. When set (e.g. by the floor-plan view),
+   * the world renders with this camera instead of the default one.
+   */
+  overrideCamera: THREE.Camera | null = null;
+
+  /**
    * Application/model meshes that belong to this world.
    *
    * Later, walls, doors, slabs, etc. can be registered here.
@@ -163,7 +169,7 @@ export class World {
       component.update(delta);
     }
 
-    this.renderer.render(this.scene, this.camera);
+    this.renderer.render(this.scene, this.overrideCamera ?? this.camera);
   }
 
   /**
@@ -189,6 +195,14 @@ export class World {
     for (const component of this.components.values()) {
       component.resize(width, height);
     }
+  }
+
+  /**
+   * Registers a model mesh with the world and adds it to the scene.
+   */
+  addMesh(mesh: THREE.Mesh): void {
+    this.meshes.add(mesh);
+    this.scene.add(mesh);
   }
 
   /**

@@ -106,47 +106,46 @@ function snapXWall(
     const leftFace = centerX - halfW;
     const rightFace = centerX + halfW;
     console.log('0000', startX, leftFace, rightFace);
-    if (dirX > 0 && startX <= leftFace && endX >= leftFace - SNAP_EPSILON) {
-      console.log('test 1');
-      endX = Math.max(endX, rightFace);
-    } else if (
-      dirX > 0 &&
-      startX >= leftFace &&
-      endX <= leftFace + SNAP_EPSILON
-    ) {
-      console.log('TEST1');
-    } else if (
-      dirX < 0 &&
-      startX <= leftFace &&
-      endX >= leftFace - SNAP_EPSILON
-    ) {
-      console.log('test 2');
-    } else if (
-      dirX < 0 &&
-      startX >= rightFace &&
-      endX <= rightFace + SNAP_EPSILON
-    ) {
-      console.log('test 3');
+    if (dirX > 0) {
+      if (startX <= leftFace && endX >= leftFace - SNAP_EPSILON) {
+        console.log('test 1');
+        endX = Math.max(endX, rightFace);
+      } else if (startX >= leftFace && endX <= leftFace + SNAP_EPSILON) {
+        console.log('TEST1');
+      } else if (startX <= rightFace && endX >= rightFace - SNAP_EPSILON) {
+        console.log('test 2');
+      } else if (startX >= rightFace && endX <= rightFace + SNAP_EPSILON) {
+        console.log('test 3');
+        endX = Math.min(endX, leftFace);
+      }
+    } else if (dirX < 0) {
+      if (startX <= leftFace && endX >= leftFace - SNAP_EPSILON) {
+        console.log('test 4');
+        endX = Math.min(endX, leftFace);
+      } else if (startX >= leftFace && endX <= leftFace + SNAP_EPSILON) {
+        console.log('test 5', startX, leftFace, endX);
+        startX = leftFace + w.width;
+      } else if (startX <= rightFace && endX >= rightFace - SNAP_EPSILON) {
+        console.log('test 6');
+      } else if (startX >= rightFace && endX <= rightFace + SNAP_EPSILON) {
+        console.log('test 7');
+        endX = Math.max(endX, rightFace);
+      }
 
-      endX = Math.min(endX, leftFace);
-    } else if (
-      dirX > 0 &&
-      startX >= rightFace &&
-      endX <= rightFace + SNAP_EPSILON
-    ) {
-      console.log('test 4');
+      if (Math.abs(startZ - w.startPoint.z) < 1) {
+        console.log('1a');
+        startZ = w.startPoint.z - w.width;
+      } else if (Math.abs(endZ - w.startPoint.z) < 1) {
+        console.log('2AA');
 
-      endX = Math.min(endX, leftFace);
+        endZ = w.startPoint.z - w.width;
+      } else if (Math.abs(endZ - w.endPoint.z) < 1) {
+        console.log('2AAA');
+
+        endZ = w.endPoint.z + w.width;
+      }
     }
-    console.log(dirX, endZ, w.startPoint.z);
-    if (dirX < 0 && Math.abs(endZ - w.startPoint.z) < 1) {
-      console.log('1a');
-      endZ = w.startPoint.z - w.width;
-    } else if (dirX < 0 && Math.abs(endZ - w.endPoint.z) < 1) {
-      console.log('2a');
-
-      endZ = w.endPoint.z + w.width;
-    } else if (dirX > 0 && Math.abs(endZ - w.startPoint.z) < 1) {
+    if (dirX > 0 && Math.abs(endZ - w.startPoint.z) < 1) {
       if (Math.abs(startX - w.startPoint.x) < 1) {
         console.log('IT IS 3a');
         startX = w.startPoint.x - halfW;

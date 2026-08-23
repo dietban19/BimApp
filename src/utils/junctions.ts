@@ -161,7 +161,7 @@ function snapXWall(
       }
 
       endZ = w.endPoint.z + w.width;
-    } else if (dirX > 0 && Math.abs(startZ - w.startPoint) < 1) {
+    } else if (dirX > 0 && Math.abs(startZ - w.startPoint.z) < 1) {
       console.log('5a');
 
       startZ = w.startPoint.z + w.width;

@@ -5,17 +5,14 @@ import { Engine } from './engine/Engine';
 import { GridComponent } from './components/GridComponent';
 import { OrbitControlsComponent } from './components/OrbitControlsComponent';
 import { RaycastComponent } from './components/RaycastComponent';
-import { LightingComponent } from './components/LightingComponent';
-import { FloorPlanComponent } from './components/FloorPlanComponent';
-import { EditorComponent } from './components/EditorComponent';
-
-import { EditorOverlay } from './ui/EditorOverlay';
+import { WallToolComponent } from './components/WallToolComponent';
+import { UIOverlay } from './ui/UIOverlay';
 
 import './App.css';
 
 function App() {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [editor, setEditor] = useState<EditorComponent | null>(null);
+  const [wallTool, setWallTool] = useState<WallToolComponent | null>(null);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -61,17 +58,8 @@ function App() {
       enableDamping: true,
     });
 
-    world.add(LightingComponent);
-
-    /*
-     * FloorPlanComponent is added before the EditorComponent so the
-     * editor can wire the shared model into it during init.
-     */
-    world.add(FloorPlanComponent);
-
-    const editorComponent = world.add(EditorComponent);
-
-    setEditor(editorComponent);
+    const wallToolComp = world.add(WallToolComponent);
+    setWallTool(wallToolComp);
 
     // --------------------------------
     // Start application
@@ -84,7 +72,7 @@ function App() {
     // --------------------------------
 
     return () => {
-      setEditor(null);
+      setWallTool(null);
       engine.dispose();
     };
   }, []);
@@ -92,7 +80,7 @@ function App() {
   return (
     <main className="app">
       <div ref={containerRef} className="three-container" />
-      {editor && <EditorOverlay editor={editor} />}
+      <UIOverlay wallTool={wallTool} />
     </main>
   );
 }

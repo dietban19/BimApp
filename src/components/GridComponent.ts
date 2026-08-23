@@ -135,49 +135,6 @@ export class GridComponent extends Component {
   }
 
   /**
-   * Snaps a world-space point to the nearest grid corner (intersection
-   * of grid lines). Walls attach to corners so junctions align exactly.
-   */
-  getCornerAtPoint(point: THREE.Vector3): THREE.Vector3 | null {
-    const halfSize = this.size / 2;
-
-    if (
-      point.x < -halfSize - this.cellSize ||
-      point.x > halfSize + this.cellSize ||
-      point.z < -halfSize - this.cellSize ||
-      point.z > halfSize + this.cellSize
-    ) {
-      return null;
-    }
-
-    const snap = (value: number): number => {
-      const index = Math.round((value + halfSize) / this.cellSize);
-      const clamped = THREE.MathUtils.clamp(index, 0, this.divisions);
-      return -halfSize + clamped * this.cellSize;
-    };
-
-    return new THREE.Vector3(snap(point.x), 0, snap(point.z));
-  }
-
-  /**
-   * Returns the grid corner under the pointer, snapped to the nearest
-   * grid-line intersection.
-   */
-  getCornerFromPointer(event: PointerEvent): THREE.Vector3 | null {
-    if (!this.raycastPlane || !this.raycaster) {
-      return null;
-    }
-
-    const intersections = this.raycaster.castObject(event, this.raycastPlane);
-
-    if (intersections.length === 0) {
-      return null;
-    }
-
-    return this.getCornerAtPoint(intersections[0].point);
-  }
-
-  /**
    * Returns the world-space center of a cell.
    */
   getCellPosition(cell: GridCell): THREE.Vector3 {

@@ -7,6 +7,15 @@ export interface JunctionResult {
   orientation: 'x' | 'z';
 }
 
+const OVERLAP_EPSILON = 1e-4;
+
+interface XZBounds {
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+}
+
 /** How close a raw endpoint must be to a wall face to trigger snapping. */
 const SNAP_EPSILON = 0.05;
 
@@ -47,10 +56,6 @@ function snapXWall(
   walls: WallMesh[],
 ): JunctionResult {
   let wallZ = rawStart.z;
-  let wallX = rawStart.x;
-
-  let startZ = rawStart.z;
-  let endZ = rawEnd.z;
   let startX = rawStart.x;
   let endX = rawEnd.x;
   const halfW = _newWallWidth / 2;
@@ -101,6 +106,11 @@ function snapXWall(
     }
   }
   for (const w of perp) {
+    const minZ = Math.min(w.startPoint.z, w.endPoint.z);
+    const maxZ = Math.max(w.startPoint.z, w.endPoint.z);
+    const isTJunction =
+      wallZ > minZ + SNAP_EPSILON && wallZ < maxZ - SNAP_EPSILON;
+
     const centerX = (w.startPoint.x + w.endPoint.x) / 2;
     const halfW = w.width / 2;
     const leftFace = centerX - halfW;
@@ -110,25 +120,35 @@ function snapXWall(
       startX >= leftFace - SNAP_EPSILON &&
       startX <= rightFace + SNAP_EPSILON
     ) {
-      // startX = dirX > 0 ? rightFace : leftFace;
       if (dirX > 0) {
-        startX = leftFace;
+        console.log('_11_');
+        startX = isTJunction ? rightFace : leftFace;
       } else if (dirX < 0) {
-        startX = rightFace;
+        console.log('_22_');
+
+        startX = isTJunction ? leftFace : rightFace;
       }
     }
   }
   for (const w of perp) {
+    const minZ = Math.min(w.startPoint.z, w.endPoint.z);
+    const maxZ = Math.max(w.startPoint.z, w.endPoint.z);
+    const isTJunction =
+      wallZ > minZ + SNAP_EPSILON && wallZ < maxZ - SNAP_EPSILON;
+
     const centerX = (w.startPoint.x + w.endPoint.x) / 2;
     const halfW = w.width / 2;
     const leftFace = centerX - halfW;
     const rightFace = centerX + halfW;
 
+    console.log('T JUNCTOIN', isTJunction);
     if (endX >= leftFace - SNAP_EPSILON && endX <= rightFace + SNAP_EPSILON) {
       if (dirX > 0) {
-        endX = rightFace;
+        console.log('_33_');
+
+        endX = isTJunction ? leftFace : rightFace;
       } else {
-        endX = leftFace;
+        endX = isTJunction ? rightFace : leftFace;
       }
     }
   }
@@ -138,19 +158,12 @@ function snapXWall(
     const existingDirX = Math.sign(w.endPoint.x - w.startPoint.x);
     if (startX >= minX - SNAP_EPSILON && startX <= maxX + SNAP_EPSILON) {
       if (dirX > 0 && existingDirX > 0) {
-        console.log('One');
         startX = w.endPoint.x;
       } else if (dirX > 0 && existingDirX < 0) {
-        console.log('TWO');
-
         startX = w.startPoint.x;
       } else if (dirX < 0 && existingDirX > 0) {
-        console.log('THREE');
-
         startX = w.startPoint.x;
       } else if (dirX < 0 && existingDirX < 0) {
-        console.log('FOUR');
-
         startX = w.endPoint.x;
       }
     }
@@ -163,16 +176,12 @@ function snapXWall(
     if (endX >= minX - SNAP_EPSILON && endX <= maxX + SNAP_EPSILON) {
       if (dirX > 0 && existingDirX > 0) {
         endX = w.startPoint.x;
-        console.log('---One');
       } else if (dirX > 0 && existingDirX < 0) {
         endX = w.endPoint.x;
-        console.log('---TWO');
       } else if (dirX < 0 && existingDirX > 0) {
         endX = w.endPoint.x;
-        console.log('---THREE');
       } else if (dirX < 0 && existingDirX < 0) {
         endX = w.startPoint.x;
-        console.log('----FOUR');
       }
     }
   }
@@ -276,8 +285,6 @@ function snapZWall(
   walls: WallMesh[],
 ): JunctionResult {
   let wallX = rawStart.x;
-  const startX = rawStart.x;
-  let endX = rawEnd.x;
   let startZ = rawStart.z;
   let endZ = rawEnd.z;
   const dirZ = Math.sign(endZ - startZ);
@@ -298,8 +305,8 @@ function snapZWall(
     const maxX = Math.max(w.startPoint.x, w.endPoint.x);
     return wallX >= minX - SNAP_EPSILON && wallX <= maxX + SNAP_EPSILON;
   });
+  console.log('z perps', perp);
 
-  console.log('z perp', perp);
   // Pass 0 – snap wallX to the left or right edge of any X wall whose
   // endpoint this Z wall is connecting to.
   for (const w of perp) {
@@ -308,10 +315,12 @@ function snapZWall(
 
     //
     if (Math.abs(wallX - minX) <= SNAP_EPSILON) {
+      console.log('MIN');
       wallX = minX + halfW;
       break;
     }
     if (Math.abs(wallX - maxX) <= SNAP_EPSILON) {
+      console.log('MAX');
       wallX = maxX - halfW;
       break;
     }
@@ -321,19 +330,16 @@ function snapZWall(
     const halfW = w.width / 2;
     const bottomFace = centerZ - halfW;
     const topFace = centerZ + halfW;
-    console.log(bottomFace, topFace);
-    console.log('startZ', startZ, 'dirZ', dirZ);
     if (
       startZ >= bottomFace - SNAP_EPSILON &&
       startZ <= topFace + SNAP_EPSILON
     ) {
-      console.log('is dirZ', dirZ > 0);
       if (dirZ > 0) {
+        console.log('AAAA');
         startZ = topFace;
-        console.log('top startZ', startZ);
       } else if (dirZ < 0) {
+        console.log('BBB');
         startZ = bottomFace;
-        console.log('bottom startZ', startZ);
       }
     }
   }
@@ -342,16 +348,14 @@ function snapZWall(
     const halfW = w.width / 2;
     const bottomFace = centerZ - halfW;
     const topFace = centerZ + halfW;
-    console.log(bottomFace, topFace);
-    console.log('startZ', startZ, 'dirZ', dirZ);
     if (endZ >= bottomFace - SNAP_EPSILON && endZ <= topFace + SNAP_EPSILON) {
-      console.log('is dirZ', dirZ > 0);
       if (dirZ > 0) {
+        console.log('111');
         endZ = bottomFace;
-        console.log('top endZ', endZ);
       } else if (dirZ < 0) {
+        console.log('222');
+
         endZ = topFace;
-        console.log('bottom startZ', startZ);
       }
     }
   }
@@ -379,4 +383,68 @@ function snapZWall(
     end: new THREE.Vector3(wallX, 0, endZ),
     orientation: 'z',
   };
+}
+
+function getCandidateBounds(
+  start: THREE.Vector3,
+  end: THREE.Vector3,
+  width: number,
+): XZBounds {
+  const dx = Math.abs(end.x - start.x);
+  const dz = Math.abs(end.z - start.z);
+  const orientation: 'x' | 'z' = dx >= dz ? 'x' : 'z';
+  const halfWidth = width / 2;
+
+  if (orientation === 'x') {
+    return {
+      minX: Math.min(start.x, end.x),
+      maxX: Math.max(start.x, end.x),
+      minZ: start.z - halfWidth,
+      maxZ: start.z + halfWidth,
+    };
+  }
+
+  return {
+    minX: start.x - halfWidth,
+    maxX: start.x + halfWidth,
+    minZ: Math.min(start.z, end.z),
+    maxZ: Math.max(start.z, end.z),
+  };
+}
+
+function boundsOverlap(a: XZBounds, b: XZBounds): boolean {
+  const overlapX = Math.min(a.maxX, b.maxX) - Math.max(a.minX, b.minX);
+  const overlapZ = Math.min(a.maxZ, b.maxZ) - Math.max(a.minZ, b.minZ);
+
+  return overlapX > OVERLAP_EPSILON && overlapZ > OVERLAP_EPSILON;
+}
+
+/**
+ * Returns true when the candidate wall footprint overlaps any existing wall
+ * footprint in the XZ plane.
+ */
+export function wouldWallOverlapExisting(
+  start: THREE.Vector3,
+  end: THREE.Vector3,
+  width: number,
+  walls: Iterable<WallMesh>,
+): boolean {
+  const length = start.distanceTo(end);
+  if (!Number.isFinite(length) || length <= OVERLAP_EPSILON) {
+    return false;
+  }
+
+  const candidate = getCandidateBounds(start, end, width);
+
+  for (const wall of walls) {
+    if (wall.isPreview) {
+      continue;
+    }
+
+    if (boundsOverlap(candidate, wall.getXZBounds())) {
+      return true;
+    }
+  }
+
+  return false;
 }

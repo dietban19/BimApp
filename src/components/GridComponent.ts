@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { Component } from '../engine/Component';
 import { RaycastComponent } from './RaycastComponent';
 import type { World } from '../engine/World';
-import type { GridCell } from '../types/GridCell';
+import type { GridCell } from '../types/GridCell.ts';
 
 export interface GridComponentOptions {
   size?: number;

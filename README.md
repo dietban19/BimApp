@@ -40,16 +40,15 @@ export default defineConfig([
       // other options...
     },
   },
-])
-
+]);
 ```
 
 You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
 
 ```js
 // eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+import reactX from 'eslint-plugin-react-x';
+import reactDom from 'eslint-plugin-react-dom';
 
 export default defineConfig([
   globalIgnores(['dist']),
@@ -70,7 +69,15 @@ export default defineConfig([
       // other options...
     },
   },
-])
-
+]);
 ```
+
 # BimApp
+
+now i want you to add a feature to connect walls. so for example i have an x wall from
+
+(x=0, z=0) to (x=10, z=0)
+
+and there are z walls connected on either end. so there should be a tool where you can choose points where walls connect.
+
+so for example, i want to move the x wall, i can click the wall, and

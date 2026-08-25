@@ -1,5 +1,8 @@
 import React, { useEffect, useReducer } from 'react';
-import type { ToolMode, WallToolComponent } from '../components/WallToolComponent';
+import type {
+  ToolMode,
+  WallToolComponent,
+} from '../components/WallToolComponent';
 import type { WallMesh } from '../objects/WallMesh';
 import type { Opening } from '../objects/openings/Opening';
 import { OPENING_LABELS, isGroundedOpeningType } from '../types/Opening';
@@ -39,6 +42,25 @@ interface WallInspectorProps {
 const WallInspector: React.FC<WallInspectorProps> = ({ wallTool, wall }) => (
   <div className="ui-inspector">
     <h3 className="ui-section-title">Selected Wall Details</h3>
+
+    <button
+      type="button"
+      className={`ui-btn ${wallTool.resizeMode ? 'active' : ''}`}
+      onClick={() => wallTool.toggleResizeMode()}
+    >
+      {wallTool.resizeMode ? '✋ Stop Resize' : '↔️ Resize Wall'}
+    </button>
+
+    {wallTool.resizeMode && (
+      <div className="ui-instruction">
+        Click a node to arm resize (it turns blue), move the mouse to resize,
+        then click again to finish.
+      </div>
+    )}
+
+    {wallTool.resizeError && (
+      <div className="ui-error-text">{wallTool.resizeError}</div>
+    )}
 
     <div className="ui-field">
       <label htmlFor="wall-height">Height (m):</label>
@@ -278,6 +300,16 @@ export const UIOverlay: React.FC<UIOverlayProps> = ({ wallTool }) => {
           ))}
         </div>
 
+        <button
+          type="button"
+          className={`ui-btn ${wallTool.roomLabelsEnabled ? 'active' : ''}`}
+          onClick={() => wallTool.toggleRoomLabels()}
+        >
+          {wallTool.roomLabelsEnabled
+            ? '🏷️ Room Labels: On'
+            : '🏷️ Room Labels: Off'}
+        </button>
+
         {/* Status Instruction */}
         <div className="ui-instruction">
           {isAddWall && wallTool.placementState === 'idle' && (
@@ -288,9 +320,14 @@ export const UIOverlay: React.FC<UIOverlayProps> = ({ wallTool }) => {
               Click second cell to place wall (Esc to cancel).
             </span>
           )}
+          {isAddWall && wallTool.wallPlacementError && (
+            <span className="ui-error-text">{wallTool.wallPlacementError}</span>
+          )}
           {isOpeningMode && !wallTool.openingPreviewMessage && (
             <span
-              className={wallTool.openingPreviewValid ? 'ui-highlight-text' : undefined}
+              className={
+                wallTool.openingPreviewValid ? 'ui-highlight-text' : undefined
+              }
             >
               {wallTool.openingPreviewValid
                 ? `Click to cut the ${openingLabel} into this wall.`
@@ -307,7 +344,9 @@ export const UIOverlay: React.FC<UIOverlayProps> = ({ wallTool }) => {
               Hover and click a wall, door or window to select and edit it.
             </span>
           )}
-          {isSelect && selectedWall && <span className="ui-highlight-text">Wall selected.</span>}
+          {isSelect && selectedWall && (
+            <span className="ui-highlight-text">Wall selected.</span>
+          )}
           {isSelect && selectedOpening && (
             <span className="ui-highlight-text">
               {OPENING_LABELS[selectedOpening.type]} selected.

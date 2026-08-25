@@ -8,7 +8,11 @@ import {
   createDefaultOpeningParams,
   createOpening,
 } from '../objects/openings/OpeningFactory';
-import { calculateWallJunctions } from '../utils/junctions';
+import {
+  calculateWallJunctions,
+  wouldWallOverlapExisting,
+} from '../utils/junctions';
+import { detectRectRooms } from '../utils/rooms';
 import type { OpeningParams, OpeningType } from '../types/Opening';
 
 export type ToolMode = 'select' | 'add-wall' | 'add-door' | 'add-window';
@@ -38,6 +42,39 @@ interface WallSurfaceHit {
   distanceAlongWall: number;
 }
 
+type ResizeHandleKind = 'start' | 'end' | 'left' | 'right';
+
+interface ResizeHandle {
+  kind: ResizeHandleKind;
+  mesh: THREE.Mesh<THREE.CylinderGeometry, THREE.MeshStandardMaterial>;
+}
+
+interface ResizeDragState {
+  wall: WallMesh;
+  kind: ResizeHandleKind;
+}
+
+const MIN_WALL_LENGTH = 0.05;
+const MIN_WALL_WIDTH = 0.05;
+const RESIZE_HANDLE_RADIUS = 0.11;
+const RESIZE_HANDLE_THICKNESS = 0.04;
+const RESIZE_HANDLE_HEIGHT = 0.05;
+const RESIZE_HANDLE_COLOR = 0xe2e8f0;
+const RESIZE_HANDLE_HOVER_COLOR = 0x60a5fa;
+const RESIZE_HANDLE_ACTIVE_COLOR = 0x2563eb;
+const ROOM_OVERLAY_Y = 0.008;
+const ROOM_LABEL_Y = 0.02;
+const ROOM_LABEL_MAX_WIDTH = 2.8;
+const ROOM_LABEL_HEIGHT = 0.5;
+const ROOM_OVERLAY_COLOR = 0x38bdf8;
+const ROOM_OVERLAY_OPACITY = 0.22;
+
+interface RoomLabelVisual {
+  floorMesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+  labelMesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+  texture: THREE.CanvasTexture;
+}
+
 export class WallToolComponent extends Component {
   mode: ToolMode = 'select';
   placementState: PlacementState = 'idle';
@@ -59,6 +96,15 @@ export class WallToolComponent extends Component {
   /** Why the last opening property edit was rejected, if it was. */
   openingEditError: string | null = null;
 
+  /** Why the last wall placement attempt was rejected, if it was. */
+  wallPlacementError: string | null = null;
+
+  resizeMode = false;
+
+  resizeError: string | null = null;
+
+  roomLabelsEnabled = false;
+
   defaultHeight = 3.0;
   defaultWidth = 0.3;
 
@@ -72,6 +118,12 @@ export class WallToolComponent extends Component {
   private previewOpeningWall: WallMesh | null = null;
 
   private pointerDownPos: { x: number; y: number } | null = null;
+
+  private hoveredResizeHandle: ResizeHandle | null = null;
+  private activeResizeHandle: ResizeHandle | null = null;
+  private activeResizeDrag: ResizeDragState | null = null;
+  private resizeHandles: ResizeHandle[] = [];
+  private roomLabelVisuals: RoomLabelVisual[] = [];
 
   private ambientLight?: THREE.AmbientLight;
   private directionalLight?: THREE.DirectionalLight;
@@ -96,6 +148,7 @@ export class WallToolComponent extends Component {
     this.raycastComponent = this.world.get(RaycastComponent);
 
     this.setupLighting();
+    this.createResizeHandles();
 
     const canvas = this.world.renderer.domElement;
     canvas.addEventListener('pointerdown', this.handlePointerDown);
@@ -116,10 +169,46 @@ export class WallToolComponent extends Component {
     if (mode !== 'select') {
       this.setHover(null);
       this.setSelection(null);
+      this.setResizeMode(false);
     }
 
     this.mode = mode;
+    this.wallPlacementError = null;
+    this.updateResizeHandlesVisibility();
+    this.updateResizeHandlesForSelection();
     this.notify();
+  }
+
+  setResizeMode(enabled: boolean): void {
+    if (this.resizeMode === enabled) return;
+
+    this.resizeMode = enabled;
+    this.resizeError = null;
+
+    if (!enabled) {
+      this.endResizeDrag();
+      this.setHoveredResizeHandle(null);
+    }
+
+    this.updateResizeHandlesVisibility();
+    this.updateResizeHandlesForSelection();
+    this.notify();
+  }
+
+  toggleResizeMode(): void {
+    this.setResizeMode(!this.resizeMode);
+  }
+
+  setRoomLabelsEnabled(enabled: boolean): void {
+    if (this.roomLabelsEnabled === enabled) return;
+
+    this.roomLabelsEnabled = enabled;
+    this.rebuildRoomLabels();
+    this.notify();
+  }
+
+  toggleRoomLabels(): void {
+    this.setRoomLabelsEnabled(!this.roomLabelsEnabled);
   }
 
   // --------------------------------
@@ -129,6 +218,7 @@ export class WallToolComponent extends Component {
   setSelectedWallHeight(height: number): void {
     if (this.selectedWall && height > 0) {
       this.selectedWall.setHeight(height);
+      this.updateResizeHandlesForSelection();
       this.notify();
     }
   }
@@ -136,6 +226,7 @@ export class WallToolComponent extends Component {
   setSelectedWallWidth(width: number): void {
     if (this.selectedWall && width > 0) {
       this.selectedWall.setWidth(width);
+      this.updateResizeHandlesForSelection();
       // Recalculate preview / junctions if needed, but for existing wall update geometry
       this.notify();
     }
@@ -170,6 +261,7 @@ export class WallToolComponent extends Component {
     this.walls.delete(wall);
     this.world.removeMesh(wall);
     wall.dispose();
+    this.rebuildRoomLabels();
 
     this.notify();
   }
@@ -289,13 +381,417 @@ export class WallToolComponent extends Component {
     }
   }
 
+  private createResizeHandles(): void {
+    const makeHandle = (kind: ResizeHandleKind): ResizeHandle => {
+      const geometry = new THREE.CylinderGeometry(
+        RESIZE_HANDLE_RADIUS,
+        RESIZE_HANDLE_RADIUS,
+        RESIZE_HANDLE_THICKNESS,
+        24,
+      );
+      const material = new THREE.MeshStandardMaterial({
+        color: RESIZE_HANDLE_COLOR,
+        roughness: 0.85,
+        metalness: 0.0,
+      });
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.visible = false;
+      mesh.renderOrder = 500;
+      this.world.scene.add(mesh);
+      return { kind, mesh };
+    };
+
+    this.resizeHandles = [
+      makeHandle('start'),
+      makeHandle('end'),
+      makeHandle('left'),
+      makeHandle('right'),
+    ];
+  }
+
+  private updateResizeHandlesVisibility(): void {
+    const visible =
+      this.mode === 'select' && this.resizeMode && this.selectedWall !== null;
+
+    for (const handle of this.resizeHandles) {
+      handle.mesh.visible = visible;
+    }
+
+    if (!visible) {
+      this.hoveredResizeHandle = null;
+      this.activeResizeHandle = null;
+      this.activeResizeDrag = null;
+      this.updateResizeHandleStyles();
+    }
+  }
+
+  private updateResizeHandlesForSelection(): void {
+    const wall = this.selectedWall;
+
+    if (!wall || !this.resizeMode || this.mode !== 'select') {
+      return;
+    }
+
+    const orientation = wall.getOrientation();
+    const midX = (wall.startPoint.x + wall.endPoint.x) / 2;
+    const midZ = (wall.startPoint.z + wall.endPoint.z) / 2;
+    const halfWidth = wall.width / 2;
+
+    for (const handle of this.resizeHandles) {
+      if (handle.kind === 'start') {
+        handle.mesh.position.set(
+          wall.startPoint.x,
+          RESIZE_HANDLE_HEIGHT,
+          wall.startPoint.z,
+        );
+        continue;
+      }
+
+      if (handle.kind === 'end') {
+        handle.mesh.position.set(
+          wall.endPoint.x,
+          RESIZE_HANDLE_HEIGHT,
+          wall.endPoint.z,
+        );
+        continue;
+      }
+
+      if (orientation === 'x') {
+        if (handle.kind === 'left') {
+          handle.mesh.position.set(
+            midX,
+            RESIZE_HANDLE_HEIGHT,
+            midZ - halfWidth,
+          );
+        } else {
+          handle.mesh.position.set(
+            midX,
+            RESIZE_HANDLE_HEIGHT,
+            midZ + halfWidth,
+          );
+        }
+      } else {
+        if (handle.kind === 'left') {
+          handle.mesh.position.set(
+            midX - halfWidth,
+            RESIZE_HANDLE_HEIGHT,
+            midZ,
+          );
+        } else {
+          handle.mesh.position.set(
+            midX + halfWidth,
+            RESIZE_HANDLE_HEIGHT,
+            midZ,
+          );
+        }
+      }
+    }
+  }
+
+  private pickResizeHandle(event: PointerEvent): ResizeHandle | null {
+    if (!this.resizeMode || this.selectedWall === null) {
+      return null;
+    }
+
+    const visible = this.resizeHandles.filter((h) => h.mesh.visible);
+    const intersections = this.raycastComponent.castObjects(
+      event,
+      visible.map((h) => h.mesh),
+      false,
+    );
+
+    for (const hit of intersections) {
+      const handle = visible.find((item) => item.mesh === hit.object);
+      if (handle) return handle;
+    }
+
+    return null;
+  }
+
+  private setHoveredResizeHandle(handle: ResizeHandle | null): void {
+    if (this.hoveredResizeHandle === handle) return;
+
+    this.hoveredResizeHandle = handle;
+    this.updateResizeHandleStyles();
+  }
+
+  private startResizeDrag(handle: ResizeHandle): void {
+    if (!this.selectedWall) return;
+
+    this.activeResizeHandle = handle;
+    this.activeResizeDrag = {
+      wall: this.selectedWall,
+      kind: handle.kind,
+    };
+    this.resizeError = null;
+    this.updateResizeHandleStyles();
+  }
+
+  private endResizeDrag(): void {
+    this.activeResizeHandle = null;
+    this.activeResizeDrag = null;
+    this.updateResizeHandleStyles();
+  }
+
+  private updateResizeHandleStyles(): void {
+    for (const handle of this.resizeHandles) {
+      let color = RESIZE_HANDLE_COLOR;
+      let scale = 1;
+
+      if (handle === this.activeResizeHandle) {
+        color = RESIZE_HANDLE_ACTIVE_COLOR;
+        scale = 1.2;
+      } else if (handle === this.hoveredResizeHandle) {
+        color = RESIZE_HANDLE_HOVER_COLOR;
+        scale = 1.1;
+      }
+
+      handle.mesh.material.color.setHex(color);
+      handle.mesh.scale.setScalar(scale);
+    }
+  }
+
+  private applyResizeDrag(event: PointerEvent): boolean {
+    const drag = this.activeResizeDrag;
+
+    if (!drag) {
+      return false;
+    }
+
+    const cell = this.gridComponent.getCellFromPointer(event);
+    if (!cell) {
+      return false;
+    }
+
+    const wall = drag.wall;
+    const pointer = this.gridComponent.getCellPosition(cell);
+
+    if (drag.kind === 'start' || drag.kind === 'end') {
+      const movingStart = drag.kind === 'start';
+      const fixed = movingStart
+        ? wall.endPoint.clone()
+        : wall.startPoint.clone();
+      const otherWalls = [...this.walls].filter((item) => item !== wall);
+
+      const junction = calculateWallJunctions(
+        fixed,
+        pointer,
+        wall.width,
+        otherWalls,
+      );
+      const resizedStart = movingStart ? junction.end : junction.start;
+      const resizedEnd = movingStart ? junction.start : junction.end;
+
+      if (resizedStart.distanceTo(resizedEnd) <= MIN_WALL_LENGTH) {
+        this.resizeError = 'Wall is too short.';
+        return false;
+      }
+
+      if (
+        wouldWallOverlapExisting(
+          resizedStart,
+          resizedEnd,
+          wall.width,
+          otherWalls,
+        )
+      ) {
+        this.resizeError =
+          'Resized wall overlaps another wall. Move the handle elsewhere.';
+        return false;
+      }
+
+      wall.setEndpoints(resizedStart, resizedEnd);
+      this.rebuildRoomLabels();
+      this.resizeError = null;
+      return true;
+    }
+
+    const orientation = wall.getOrientation();
+    const midX = (wall.startPoint.x + wall.endPoint.x) / 2;
+    const midZ = (wall.startPoint.z + wall.endPoint.z) / 2;
+    const axis =
+      orientation === 'x'
+        ? Math.abs(pointer.z - midZ)
+        : Math.abs(pointer.x - midX);
+    const nextWidth = Math.max(axis * 2, MIN_WALL_WIDTH);
+
+    const otherWalls = [...this.walls].filter((item) => item !== wall);
+    if (
+      wouldWallOverlapExisting(
+        wall.startPoint,
+        wall.endPoint,
+        nextWidth,
+        otherWalls,
+      )
+    ) {
+      this.resizeError =
+        'Resized wall overlaps another wall. Move the handle elsewhere.';
+      return false;
+    }
+
+    wall.setWidth(nextWidth);
+    this.rebuildRoomLabels();
+    this.resizeError = null;
+    return true;
+  }
+
+  private clearRoomLabels(): void {
+    for (const label of this.roomLabelVisuals) {
+      this.world.scene.remove(label.floorMesh);
+      this.world.scene.remove(label.labelMesh);
+      label.floorMesh.geometry.dispose();
+      label.labelMesh.geometry.dispose();
+      label.floorMesh.material.dispose();
+      label.labelMesh.material.dispose();
+      label.texture.dispose();
+    }
+
+    this.roomLabelVisuals = [];
+  }
+
+  private createRoomLabelVisual(
+    text: string,
+    x: number,
+    z: number,
+    widthHint: number,
+    roomWidth: number,
+    roomDepth: number,
+  ): RoomLabelVisual {
+    const canvas = document.createElement('canvas');
+    canvas.width = 512;
+    canvas.height = 128;
+    const ctx = canvas.getContext('2d');
+
+    if (!ctx) {
+      throw new Error('Unable to create 2D context for room label.');
+    }
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    ctx.fillStyle = '#0f172a';
+    ctx.globalAlpha = 0.78;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = '#f8fafc';
+    ctx.font =
+      '600 40px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, canvas.width / 2, canvas.height / 2 + 2);
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.anisotropy = 4;
+    texture.needsUpdate = true;
+
+    const worldWidth = Math.min(
+      Math.max(widthHint * 0.45, 1.2),
+      ROOM_LABEL_MAX_WIDTH,
+    );
+    const labelGeometry = new THREE.PlaneGeometry(
+      worldWidth,
+      ROOM_LABEL_HEIGHT,
+    );
+    const labelMaterial = new THREE.MeshBasicMaterial({
+      map: texture,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+
+    const floorGeometry = new THREE.PlaneGeometry(roomWidth, roomDepth);
+    const floorMaterial = new THREE.MeshBasicMaterial({
+      color: ROOM_OVERLAY_COLOR,
+      transparent: true,
+      opacity: ROOM_OVERLAY_OPACITY,
+      depthTest: false,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+
+    const floorMesh = new THREE.Mesh(floorGeometry, floorMaterial);
+    floorMesh.rotation.x = -Math.PI / 2;
+    floorMesh.position.set(x, ROOM_OVERLAY_Y, z);
+    floorMesh.renderOrder = 260;
+
+    const labelMesh = new THREE.Mesh(labelGeometry, labelMaterial);
+    labelMesh.rotation.x = -Math.PI / 2;
+    labelMesh.position.set(x, ROOM_LABEL_Y, z);
+    labelMesh.renderOrder = 320;
+
+    this.world.scene.add(floorMesh);
+    this.world.scene.add(labelMesh);
+
+    return { floorMesh, labelMesh, texture };
+  }
+
+  private rebuildRoomLabels(): void {
+    this.clearRoomLabels();
+
+    if (!this.roomLabelsEnabled) {
+      return;
+    }
+
+    const rooms = detectRectRooms(this.walls);
+
+    for (let i = 0; i < rooms.length; i += 1) {
+      const room = rooms[i];
+      const roomName = `Room ${i + 1}`;
+      const visual = this.createRoomLabelVisual(
+        roomName,
+        room.centerX,
+        room.centerZ,
+        Math.min(room.maxX - room.minX, room.maxZ - room.minZ),
+        room.maxX - room.minX,
+        room.maxZ - room.minZ,
+      );
+      this.roomLabelVisuals.push(visual);
+    }
+  }
+
   private handlePointerDown = (event: PointerEvent): void => {
     if (!this.enabled) return;
+
+    if (this.mode === 'select' && this.resizeMode) {
+      if (this.activeResizeDrag) {
+        const nextHandle = this.pickResizeHandle(event);
+
+        if (nextHandle) {
+          this.startResizeDrag(nextHandle);
+        } else {
+          this.endResizeDrag();
+        }
+
+        this.notify();
+        return;
+      }
+
+      const handle = this.pickResizeHandle(event);
+      if (handle) {
+        this.startResizeDrag(handle);
+        this.notify();
+        return;
+      }
+    }
+
     this.pointerDownPos = { x: event.clientX, y: event.clientY };
   };
 
   private handlePointerMove = (event: PointerEvent): void => {
     if (!this.enabled) return;
+
+    if (this.activeResizeDrag) {
+      const previousError = this.resizeError;
+      const changed = this.applyResizeDrag(event);
+      this.updateResizeHandlesForSelection();
+
+      if (changed || previousError !== this.resizeError) {
+        this.notify();
+      }
+
+      return;
+    }
 
     const openingType = getOpeningTypeForMode(this.mode);
 
@@ -304,6 +800,12 @@ export class WallToolComponent extends Component {
     } else if (openingType) {
       this.handleOpeningPlacementMove(event, openingType);
     } else if (this.mode === 'select') {
+      if (this.resizeMode) {
+        this.setHoveredResizeHandle(this.pickResizeHandle(event));
+      } else {
+        this.setHoveredResizeHandle(null);
+      }
+
       this.handleSelectionMove(event);
     }
   };
@@ -335,6 +837,11 @@ export class WallToolComponent extends Component {
       this.world.scene.add(this.previewWall);
     } else {
       this.previewWall.setEndpoints(junction.start, junction.end);
+    }
+
+    if (this.wallPlacementError) {
+      this.wallPlacementError = null;
+      this.notify();
     }
   }
 
@@ -494,7 +1001,13 @@ export class WallToolComponent extends Component {
   }
 
   private handlePointerUp = (event: PointerEvent): void => {
-    if (!this.enabled || !this.pointerDownPos) return;
+    if (!this.enabled) return;
+
+    if (this.activeResizeDrag) {
+      return;
+    }
+
+    if (!this.pointerDownPos) return;
 
     const dragDist = Math.hypot(
       event.clientX - this.pointerDownPos.x,
@@ -524,6 +1037,7 @@ export class WallToolComponent extends Component {
     const clickPos = this.gridComponent.getCellPosition(cell);
 
     if (this.placementState === 'idle') {
+      this.wallPlacementError = null;
       this.startPoint = clickPos;
       this.placementState = 'picking-end';
 
@@ -548,22 +1062,42 @@ export class WallToolComponent extends Component {
 
       const length = junction.start.distanceTo(junction.end);
 
-      if (length > 0.05) {
-        // Place permanent wall
-        const newWall = new WallMesh({
-          startPoint: junction.start,
-          endPoint: junction.end,
-          height: this.defaultHeight,
-          width: this.defaultWidth,
-          isPreview: false,
-        });
-
-        newWall.onOpeningsRemoved = this.handleOpeningsRemoved;
-
-        this.walls.add(newWall);
-        this.world.scene.add(newWall);
-        this.world.meshes.add(newWall);
+      if (length <= 0.05) {
+        this.wallPlacementError = 'Wall is too short.';
+        this.notify();
+        return;
       }
+
+      if (
+        wouldWallOverlapExisting(
+          junction.start,
+          junction.end,
+          this.defaultWidth,
+          this.walls,
+        )
+      ) {
+        this.wallPlacementError =
+          'Wall overlaps an existing wall. Choose a different endpoint.';
+        this.notify();
+        return;
+      }
+
+      // Place permanent wall
+      const newWall = new WallMesh({
+        startPoint: junction.start,
+        endPoint: junction.end,
+        height: this.defaultHeight,
+        width: this.defaultWidth,
+        isPreview: false,
+      });
+
+      newWall.onOpeningsRemoved = this.handleOpeningsRemoved;
+
+      this.walls.add(newWall);
+      this.world.scene.add(newWall);
+      this.world.meshes.add(newWall);
+      this.wallPlacementError = null;
+      this.rebuildRoomLabels();
 
       // Cleanup preview
       this.cancelPlacement();
@@ -598,6 +1132,13 @@ export class WallToolComponent extends Component {
   }
 
   private handlePointerLeave = (): void => {
+    if (this.activeResizeDrag) {
+      this.endResizeDrag();
+      this.notify();
+    }
+
+    this.setHoveredResizeHandle(null);
+
     const previewChanged = this.clearOpeningPreview();
     const hadHover = this.hoveredWall !== null || this.hoveredOpening !== null;
 
@@ -623,7 +1164,9 @@ export class WallToolComponent extends Component {
     } else if (event.key === 'Delete' || event.key === 'Backspace') {
       // Avoid deleting if user is typing in an input field
       const activeEl = document.activeElement;
-      const isInput = activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA');
+      const isInput =
+        activeEl &&
+        (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA');
       if (isInput) return;
 
       if (this.selectedOpening) {
@@ -639,7 +1182,8 @@ export class WallToolComponent extends Component {
   // --------------------------------
 
   private setSelection(target: Selectable | null): void {
-    const current: Selectable | null = this.selectedOpening ?? this.selectedWall;
+    const current: Selectable | null =
+      this.selectedOpening ?? this.selectedWall;
 
     if (current === target) return;
 
@@ -648,8 +1192,17 @@ export class WallToolComponent extends Component {
     this.selectedWall = target instanceof WallMesh ? target : null;
     this.selectedOpening = target instanceof Opening ? target : null;
     this.openingEditError = null;
+    this.resizeError = null;
+
+    if (!this.selectedWall) {
+      this.endResizeDrag();
+      this.setHoveredResizeHandle(null);
+    }
 
     target?.setSelected(true);
+
+    this.updateResizeHandlesVisibility();
+    this.updateResizeHandlesForSelection();
 
     this.notify();
   }
@@ -695,6 +1248,16 @@ export class WallToolComponent extends Component {
     this.cancelPlacement();
     this.clearOpeningPreview();
     this.setSelection(null);
+    this.endResizeDrag();
+    this.setHoveredResizeHandle(null);
+    this.clearRoomLabels();
+
+    for (const handle of this.resizeHandles) {
+      this.world.scene.remove(handle.mesh);
+      handle.mesh.geometry.dispose();
+      handle.mesh.material.dispose();
+    }
+    this.resizeHandles = [];
 
     for (const wall of this.walls) {
       for (const opening of wall.openings) {

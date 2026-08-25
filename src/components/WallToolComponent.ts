@@ -12,7 +12,6 @@ import {
   calculateWallJunctions,
   wouldWallOverlapExisting,
 } from '../utils/junctions';
-import { detectRectRooms } from '../utils/rooms';
 import type { OpeningParams, OpeningType } from '../types/Opening';
 
 export type ToolMode = 'select' | 'add-wall' | 'add-door' | 'add-window';
@@ -46,7 +45,7 @@ type ResizeHandleKind = 'start' | 'end' | 'left' | 'right';
 
 interface ResizeHandle {
   kind: ResizeHandleKind;
-  mesh: THREE.Mesh<THREE.CylinderGeometry, THREE.MeshStandardMaterial>;
+  mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>;
 }
 
 interface ResizeDragState {
@@ -55,25 +54,16 @@ interface ResizeDragState {
 }
 
 const MIN_WALL_LENGTH = 0.05;
-const MIN_WALL_WIDTH = 0.05;
-const RESIZE_HANDLE_RADIUS = 0.11;
-const RESIZE_HANDLE_THICKNESS = 0.04;
+const NODE_RADIUS = 0.12;
+const GUMBALL_RADIUS = 0.095;
+const END_GRIP_LENGTH = 0.2;
 const RESIZE_HANDLE_HEIGHT = 0.05;
-const RESIZE_HANDLE_COLOR = 0xe2e8f0;
-const RESIZE_HANDLE_HOVER_COLOR = 0x60a5fa;
-const RESIZE_HANDLE_ACTIVE_COLOR = 0x2563eb;
-const ROOM_OVERLAY_Y = 0.008;
-const ROOM_LABEL_Y = 0.02;
-const ROOM_LABEL_MAX_WIDTH = 2.8;
-const ROOM_LABEL_HEIGHT = 0.5;
-const ROOM_OVERLAY_COLOR = 0x38bdf8;
-const ROOM_OVERLAY_OPACITY = 0.22;
-
-interface RoomLabelVisual {
-  floorMesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
-  labelMesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
-  texture: THREE.CanvasTexture;
-}
+const RESIZE_NODE_COLOR = 0xe2e8f0;
+const RESIZE_NODE_HOVER_COLOR = 0x93c5fd;
+const RESIZE_NODE_ACTIVE_COLOR = 0x2563eb;
+const GUMBALL_COLOR = 0x0ea5e9;
+const GUMBALL_HOVER_COLOR = 0x0284c7;
+const ENDPOINT_PICK_RADIUS = 0.35;
 
 export class WallToolComponent extends Component {
   mode: ToolMode = 'select';
@@ -103,8 +93,6 @@ export class WallToolComponent extends Component {
 
   resizeError: string | null = null;
 
-  roomLabelsEnabled = false;
-
   defaultHeight = 3.0;
   defaultWidth = 0.3;
 
@@ -120,10 +108,17 @@ export class WallToolComponent extends Component {
   private pointerDownPos: { x: number; y: number } | null = null;
 
   private hoveredResizeHandle: ResizeHandle | null = null;
+  private hoveredGumball = false;
   private activeResizeHandle: ResizeHandle | null = null;
   private activeResizeDrag: ResizeDragState | null = null;
   private resizeHandles: ResizeHandle[] = [];
-  private roomLabelVisuals: RoomLabelVisual[] = [];
+  private gumballHandle:
+    | THREE.Mesh<THREE.ConeGeometry, THREE.MeshStandardMaterial>
+    | null = null;
+  private resizeAxisLine: THREE.Line<
+    THREE.BufferGeometry,
+    THREE.LineBasicMaterial
+  > | null = null;
 
   private ambientLight?: THREE.AmbientLight;
   private directionalLight?: THREE.DirectionalLight;
@@ -199,18 +194,6 @@ export class WallToolComponent extends Component {
     this.setResizeMode(!this.resizeMode);
   }
 
-  setRoomLabelsEnabled(enabled: boolean): void {
-    if (this.roomLabelsEnabled === enabled) return;
-
-    this.roomLabelsEnabled = enabled;
-    this.rebuildRoomLabels();
-    this.notify();
-  }
-
-  toggleRoomLabels(): void {
-    this.setRoomLabelsEnabled(!this.roomLabelsEnabled);
-  }
-
   // --------------------------------
   // Wall properties
   // --------------------------------
@@ -230,14 +213,6 @@ export class WallToolComponent extends Component {
       // Recalculate preview / junctions if needed, but for existing wall update geometry
       this.notify();
     }
-  }
-
-  setSelectedWallRoomBoundary(enabled: boolean): void {
-    if (!this.selectedWall) return;
-
-    this.selectedWall.setRoomBoundary(enabled);
-    this.rebuildRoomLabels();
-    this.notify();
   }
 
   deleteSelectedWall(): void {
@@ -269,7 +244,6 @@ export class WallToolComponent extends Component {
     this.walls.delete(wall);
     this.world.removeMesh(wall);
     wall.dispose();
-    this.rebuildRoomLabels();
 
     this.notify();
   }
@@ -391,15 +365,10 @@ export class WallToolComponent extends Component {
 
   private createResizeHandles(): void {
     const makeHandle = (kind: ResizeHandleKind): ResizeHandle => {
-      const geometry = new THREE.CylinderGeometry(
-        RESIZE_HANDLE_RADIUS,
-        RESIZE_HANDLE_RADIUS,
-        RESIZE_HANDLE_THICKNESS,
-        24,
-      );
+      const geometry = new THREE.SphereGeometry(NODE_RADIUS, 18, 18);
       const material = new THREE.MeshStandardMaterial({
-        color: RESIZE_HANDLE_COLOR,
-        roughness: 0.85,
+        color: RESIZE_NODE_COLOR,
+        roughness: 0.7,
         metalness: 0.0,
       });
       const mesh = new THREE.Mesh(geometry, material);
@@ -409,12 +378,33 @@ export class WallToolComponent extends Component {
       return { kind, mesh };
     };
 
-    this.resizeHandles = [
-      makeHandle('start'),
-      makeHandle('end'),
-      makeHandle('left'),
-      makeHandle('right'),
-    ];
+    this.resizeHandles = [makeHandle('start'), makeHandle('end')];
+
+    this.gumballHandle = new THREE.Mesh(
+      new THREE.ConeGeometry(GUMBALL_RADIUS, END_GRIP_LENGTH, 20),
+      new THREE.MeshStandardMaterial({
+        color: GUMBALL_COLOR,
+        roughness: 0.45,
+        metalness: 0.05,
+      }),
+    );
+    this.gumballHandle.visible = false;
+    this.gumballHandle.renderOrder = 550;
+    this.world.scene.add(this.gumballHandle);
+
+    const lineMaterial = new THREE.LineBasicMaterial({
+      color: 0x60a5fa,
+      transparent: true,
+      opacity: 0.8,
+    });
+    const lineGeometry = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(),
+      new THREE.Vector3(),
+    ]);
+    this.resizeAxisLine = new THREE.Line(lineGeometry, lineMaterial);
+    this.resizeAxisLine.visible = false;
+    this.resizeAxisLine.renderOrder = 450;
+    this.world.scene.add(this.resizeAxisLine);
   }
 
   private updateResizeHandlesVisibility(): void {
@@ -424,9 +414,16 @@ export class WallToolComponent extends Component {
     for (const handle of this.resizeHandles) {
       handle.mesh.visible = visible;
     }
+    if (this.resizeAxisLine) {
+      this.resizeAxisLine.visible = visible && this.activeResizeHandle !== null;
+    }
+    if (this.gumballHandle) {
+      this.gumballHandle.visible = visible && this.activeResizeHandle !== null;
+    }
 
     if (!visible) {
       this.hoveredResizeHandle = null;
+      this.hoveredGumball = false;
       this.activeResizeHandle = null;
       this.activeResizeDrag = null;
       this.updateResizeHandleStyles();
@@ -440,59 +437,45 @@ export class WallToolComponent extends Component {
       return;
     }
 
-    const orientation = wall.getOrientation();
-    const midX = (wall.startPoint.x + wall.endPoint.x) / 2;
-    const midZ = (wall.startPoint.z + wall.endPoint.z) / 2;
-    const halfWidth = wall.width / 2;
+    const axisStart = wall.startPoint.clone().setY(RESIZE_HANDLE_HEIGHT);
+    const axisEnd = wall.endPoint.clone().setY(RESIZE_HANDLE_HEIGHT);
+
+    const direction = axisEnd.clone().sub(axisStart).normalize();
+    const invertDirection = direction.clone().multiplyScalar(-1);
+
+    if (this.resizeAxisLine) {
+      this.resizeAxisLine.geometry.dispose();
+      this.resizeAxisLine.geometry = new THREE.BufferGeometry().setFromPoints([
+        axisStart,
+        axisEnd,
+      ]);
+      this.resizeAxisLine.visible = this.activeResizeHandle !== null;
+    }
 
     for (const handle of this.resizeHandles) {
       if (handle.kind === 'start') {
-        handle.mesh.position.set(
-          wall.startPoint.x,
-          RESIZE_HANDLE_HEIGHT,
-          wall.startPoint.z,
-        );
-        continue;
-      }
-
-      if (handle.kind === 'end') {
-        handle.mesh.position.set(
-          wall.endPoint.x,
-          RESIZE_HANDLE_HEIGHT,
-          wall.endPoint.z,
-        );
-        continue;
-      }
-
-      if (orientation === 'x') {
-        if (handle.kind === 'left') {
-          handle.mesh.position.set(
-            midX,
-            RESIZE_HANDLE_HEIGHT,
-            midZ - halfWidth,
-          );
-        } else {
-          handle.mesh.position.set(
-            midX,
-            RESIZE_HANDLE_HEIGHT,
-            midZ + halfWidth,
-          );
-        }
+        handle.mesh.position.copy(axisStart);
       } else {
-        if (handle.kind === 'left') {
-          handle.mesh.position.set(
-            midX - halfWidth,
-            RESIZE_HANDLE_HEIGHT,
-            midZ,
-          );
-        } else {
-          handle.mesh.position.set(
-            midX + halfWidth,
-            RESIZE_HANDLE_HEIGHT,
-            midZ,
-          );
-        }
+        handle.mesh.position.copy(axisEnd);
       }
+    }
+
+    if (this.activeResizeHandle && this.gumballHandle) {
+      const activeAtStart = this.activeResizeHandle.kind === 'start';
+      const origin = activeAtStart ? axisStart : axisEnd;
+      const axisDir = activeAtStart ? invertDirection : direction;
+
+      this.gumballHandle.visible = true;
+      this.gumballHandle.position.copy(origin);
+      this.gumballHandle.quaternion.setFromUnitVectors(
+        new THREE.Vector3(0, 1, 0),
+        axisDir,
+      );
+
+      const offset = axisDir.clone().multiplyScalar(END_GRIP_LENGTH * 0.55);
+      this.gumballHandle.position.add(offset);
+    } else if (this.gumballHandle) {
+      this.gumballHandle.visible = false;
     }
   }
 
@@ -516,10 +499,54 @@ export class WallToolComponent extends Component {
     return null;
   }
 
+  private pickWallEndHandle(event: PointerEvent): ResizeHandle | null {
+    const wall = this.selectedWall;
+
+    if (!this.resizeMode || !wall) {
+      return null;
+    }
+
+    const intersections = this.raycastComponent.castObject(event, wall, false);
+    if (intersections.length === 0) {
+      return null;
+    }
+
+    const hit = intersections[0].point;
+    const hitFlat = new THREE.Vector3(hit.x, 0, hit.z);
+    const start = wall.startPoint.clone().setY(0);
+    const end = wall.endPoint.clone().setY(0);
+
+    const distToStart = hitFlat.distanceTo(start);
+    const distToEnd = hitFlat.distanceTo(end);
+    const pickRadius = Math.max(ENDPOINT_PICK_RADIUS, wall.width * 1.5);
+
+    if (distToStart > pickRadius && distToEnd > pickRadius) {
+      return null;
+    }
+
+    const kind: ResizeHandleKind = distToStart <= distToEnd ? 'start' : 'end';
+    return this.resizeHandles.find((handle) => handle.kind === kind) ?? null;
+  }
+
+  private isPointerOnGumball(event: PointerEvent): boolean {
+    if (!this.gumballHandle || !this.gumballHandle.visible) {
+      return false;
+    }
+
+    const hits = this.raycastComponent.castObject(event, this.gumballHandle, false);
+    return hits.length > 0;
+  }
+
   private setHoveredResizeHandle(handle: ResizeHandle | null): void {
     if (this.hoveredResizeHandle === handle) return;
 
     this.hoveredResizeHandle = handle;
+    this.updateResizeHandleStyles();
+  }
+
+  private setHoveredGumball(hovered: boolean): void {
+    if (this.hoveredGumball === hovered) return;
+    this.hoveredGumball = hovered;
     this.updateResizeHandleStyles();
   }
 
@@ -536,26 +563,33 @@ export class WallToolComponent extends Component {
   }
 
   private endResizeDrag(): void {
-    this.activeResizeHandle = null;
     this.activeResizeDrag = null;
+    this.hoveredGumball = false;
     this.updateResizeHandleStyles();
   }
 
   private updateResizeHandleStyles(): void {
     for (const handle of this.resizeHandles) {
-      let color = RESIZE_HANDLE_COLOR;
+      let color = RESIZE_NODE_COLOR;
       let scale = 1;
 
       if (handle === this.activeResizeHandle) {
-        color = RESIZE_HANDLE_ACTIVE_COLOR;
-        scale = 1.2;
+        color = RESIZE_NODE_ACTIVE_COLOR;
+        scale = 1.16;
       } else if (handle === this.hoveredResizeHandle) {
-        color = RESIZE_HANDLE_HOVER_COLOR;
-        scale = 1.1;
+        color = RESIZE_NODE_HOVER_COLOR;
+        scale = 1.08;
       }
 
       handle.mesh.material.color.setHex(color);
       handle.mesh.scale.setScalar(scale);
+    }
+
+    if (this.gumballHandle) {
+      this.gumballHandle.material.color.setHex(
+        this.hoveredGumball ? GUMBALL_HOVER_COLOR : GUMBALL_COLOR,
+      );
+      this.gumballHandle.scale.setScalar(this.activeResizeDrag ? 1.12 : 1);
     }
   }
 
@@ -609,153 +643,11 @@ export class WallToolComponent extends Component {
       }
 
       wall.setEndpoints(resizedStart, resizedEnd);
-      this.rebuildRoomLabels();
       this.resizeError = null;
       return true;
     }
 
-    const orientation = wall.getOrientation();
-    const midX = (wall.startPoint.x + wall.endPoint.x) / 2;
-    const midZ = (wall.startPoint.z + wall.endPoint.z) / 2;
-    const axis =
-      orientation === 'x'
-        ? Math.abs(pointer.z - midZ)
-        : Math.abs(pointer.x - midX);
-    const nextWidth = Math.max(axis * 2, MIN_WALL_WIDTH);
-
-    const otherWalls = [...this.walls].filter((item) => item !== wall);
-    if (
-      wouldWallOverlapExisting(
-        wall.startPoint,
-        wall.endPoint,
-        nextWidth,
-        otherWalls,
-      )
-    ) {
-      this.resizeError =
-        'Resized wall overlaps another wall. Move the handle elsewhere.';
-      return false;
-    }
-
-    wall.setWidth(nextWidth);
-    this.rebuildRoomLabels();
-    this.resizeError = null;
-    return true;
-  }
-
-  private clearRoomLabels(): void {
-    for (const label of this.roomLabelVisuals) {
-      this.world.scene.remove(label.floorMesh);
-      this.world.scene.remove(label.labelMesh);
-      label.floorMesh.geometry.dispose();
-      label.labelMesh.geometry.dispose();
-      label.floorMesh.material.dispose();
-      label.labelMesh.material.dispose();
-      label.texture.dispose();
-    }
-
-    this.roomLabelVisuals = [];
-  }
-
-  private createRoomLabelVisual(
-    text: string,
-    x: number,
-    z: number,
-    widthHint: number,
-    roomWidth: number,
-    roomDepth: number,
-  ): RoomLabelVisual {
-    const canvas = document.createElement('canvas');
-    canvas.width = 512;
-    canvas.height = 128;
-    const ctx = canvas.getContext('2d');
-
-    if (!ctx) {
-      throw new Error('Unable to create 2D context for room label.');
-    }
-
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    ctx.fillStyle = '#0f172a';
-    ctx.globalAlpha = 0.78;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.globalAlpha = 1;
-
-    ctx.fillStyle = '#f8fafc';
-    ctx.font =
-      '600 40px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(text, canvas.width / 2, canvas.height / 2 + 2);
-
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.anisotropy = 4;
-    texture.needsUpdate = true;
-
-    const worldWidth = Math.min(
-      Math.max(widthHint * 0.45, 1.2),
-      ROOM_LABEL_MAX_WIDTH,
-    );
-    const labelGeometry = new THREE.PlaneGeometry(
-      worldWidth,
-      ROOM_LABEL_HEIGHT,
-    );
-    const labelMaterial = new THREE.MeshBasicMaterial({
-      map: texture,
-      transparent: true,
-      depthTest: false,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-    });
-
-    const floorGeometry = new THREE.PlaneGeometry(roomWidth, roomDepth);
-    const floorMaterial = new THREE.MeshBasicMaterial({
-      color: ROOM_OVERLAY_COLOR,
-      transparent: true,
-      opacity: ROOM_OVERLAY_OPACITY,
-      depthTest: false,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-    });
-
-    const floorMesh = new THREE.Mesh(floorGeometry, floorMaterial);
-    floorMesh.rotation.x = -Math.PI / 2;
-    floorMesh.position.set(x, ROOM_OVERLAY_Y, z);
-    floorMesh.renderOrder = 260;
-
-    const labelMesh = new THREE.Mesh(labelGeometry, labelMaterial);
-    labelMesh.rotation.x = -Math.PI / 2;
-    labelMesh.position.set(x, ROOM_LABEL_Y, z);
-    labelMesh.renderOrder = 320;
-
-    this.world.scene.add(floorMesh);
-    this.world.scene.add(labelMesh);
-
-    return { floorMesh, labelMesh, texture };
-  }
-
-  private rebuildRoomLabels(): void {
-    this.clearRoomLabels();
-
-    if (!this.roomLabelsEnabled) {
-      return;
-    }
-
-    const rooms = detectRectRooms(this.walls);
-
-    for (let i = 0; i < rooms.length; i += 1) {
-      const room = rooms[i];
-      const roomName = `Room ${i + 1}`;
-      const visual = this.createRoomLabelVisual(
-        roomName,
-        room.centerX,
-        room.centerZ,
-        Math.min(room.maxX - room.minX, room.maxZ - room.minZ),
-        room.maxX - room.minX,
-        room.maxZ - room.minZ,
-      );
-      this.roomLabelVisuals.push(visual);
-    }
+    return false;
   }
 
   private handlePointerDown = (event: PointerEvent): void => {
@@ -763,21 +655,25 @@ export class WallToolComponent extends Component {
 
     if (this.mode === 'select' && this.resizeMode) {
       if (this.activeResizeDrag) {
-        const nextHandle = this.pickResizeHandle(event);
-
-        if (nextHandle) {
-          this.startResizeDrag(nextHandle);
-        } else {
-          this.endResizeDrag();
-        }
-
+        this.endResizeDrag();
+        this.updateResizeHandlesForSelection();
         this.notify();
         return;
       }
 
-      const handle = this.pickResizeHandle(event);
-      if (handle) {
-        this.startResizeDrag(handle);
+      const node = this.pickResizeHandle(event) ?? this.pickWallEndHandle(event);
+      if (node) {
+        this.activeResizeHandle = node;
+        this.resizeError = null;
+        this.updateResizeHandlesForSelection();
+        this.updateResizeHandleStyles();
+        this.notify();
+        return;
+      }
+
+      if (this.activeResizeHandle && this.isPointerOnGumball(event)) {
+        this.startResizeDrag(this.activeResizeHandle);
+        this.updateResizeHandlesForSelection();
         this.notify();
         return;
       }
@@ -810,8 +706,10 @@ export class WallToolComponent extends Component {
     } else if (this.mode === 'select') {
       if (this.resizeMode) {
         this.setHoveredResizeHandle(this.pickResizeHandle(event));
+        this.setHoveredGumball(this.isPointerOnGumball(event));
       } else {
         this.setHoveredResizeHandle(null);
+        this.setHoveredGumball(false);
       }
 
       this.handleSelectionMove(event);
@@ -1011,10 +909,6 @@ export class WallToolComponent extends Component {
   private handlePointerUp = (event: PointerEvent): void => {
     if (!this.enabled) return;
 
-    if (this.activeResizeDrag) {
-      return;
-    }
-
     if (!this.pointerDownPos) return;
 
     const dragDist = Math.hypot(
@@ -1105,7 +999,6 @@ export class WallToolComponent extends Component {
       this.world.scene.add(newWall);
       this.world.meshes.add(newWall);
       this.wallPlacementError = null;
-      this.rebuildRoomLabels();
 
       // Cleanup preview
       this.cancelPlacement();
@@ -1146,6 +1039,7 @@ export class WallToolComponent extends Component {
     }
 
     this.setHoveredResizeHandle(null);
+    this.setHoveredGumball(false);
 
     const previewChanged = this.clearOpeningPreview();
     const hadHover = this.hoveredWall !== null || this.hoveredOpening !== null;
@@ -1201,10 +1095,12 @@ export class WallToolComponent extends Component {
     this.selectedOpening = target instanceof Opening ? target : null;
     this.openingEditError = null;
     this.resizeError = null;
+    this.activeResizeHandle = null;
 
     if (!this.selectedWall) {
       this.endResizeDrag();
       this.setHoveredResizeHandle(null);
+      this.setHoveredGumball(false);
     }
 
     target?.setSelected(true);
@@ -1258,7 +1154,6 @@ export class WallToolComponent extends Component {
     this.setSelection(null);
     this.endResizeDrag();
     this.setHoveredResizeHandle(null);
-    this.clearRoomLabels();
 
     for (const handle of this.resizeHandles) {
       this.world.scene.remove(handle.mesh);
@@ -1266,6 +1161,13 @@ export class WallToolComponent extends Component {
       handle.mesh.material.dispose();
     }
     this.resizeHandles = [];
+
+    if (this.resizeAxisLine) {
+      this.world.scene.remove(this.resizeAxisLine);
+      this.resizeAxisLine.geometry.dispose();
+      this.resizeAxisLine.material.dispose();
+      this.resizeAxisLine = null;
+    }
 
     for (const wall of this.walls) {
       for (const opening of wall.openings) {

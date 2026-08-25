@@ -53,24 +53,14 @@ const WallInspector: React.FC<WallInspectorProps> = ({ wallTool, wall }) => (
 
     {wallTool.resizeMode && (
       <div className="ui-instruction">
-        Click a node to arm resize (it turns blue), move the mouse to resize,
-        then click again to finish.
+        Click an end node to open the gumball, click the gumball arrow to start
+        resize, move the mouse, then click once to finish.
       </div>
     )}
 
     {wallTool.resizeError && (
       <div className="ui-error-text">{wallTool.resizeError}</div>
     )}
-
-    <button
-      type="button"
-      className="ui-btn"
-      onClick={() => wallTool.setSelectedWallRoomBoundary(!wall.isRoomBoundary)}
-    >
-      {wall.isRoomBoundary
-        ? 'Merge rooms across this wall'
-        : 'Use wall to split rooms'}
-    </button>
 
     <div className="ui-field">
       <label htmlFor="wall-height">Height (m):</label>
@@ -309,16 +299,6 @@ export const UIOverlay: React.FC<UIOverlayProps> = ({ wallTool }) => {
             </button>
           ))}
         </div>
-
-        <button
-          type="button"
-          className={`ui-btn ${wallTool.roomLabelsEnabled ? 'active' : ''}`}
-          onClick={() => wallTool.toggleRoomLabels()}
-        >
-          {wallTool.roomLabelsEnabled
-            ? '🏷️ Room Labels: On'
-            : '🏷️ Room Labels: Off'}
-        </button>
 
         {/* Status Instruction */}
         <div className="ui-instruction">

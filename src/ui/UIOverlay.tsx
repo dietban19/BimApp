@@ -62,6 +62,16 @@ const WallInspector: React.FC<WallInspectorProps> = ({ wallTool, wall }) => (
       <div className="ui-error-text">{wallTool.resizeError}</div>
     )}
 
+    <button
+      type="button"
+      className="ui-btn"
+      onClick={() => wallTool.setSelectedWallRoomBoundary(!wall.isRoomBoundary)}
+    >
+      {wall.isRoomBoundary
+        ? 'Merge rooms across this wall'
+        : 'Use wall to split rooms'}
+    </button>
+
     <div className="ui-field">
       <label htmlFor="wall-height">Height (m):</label>
       <input

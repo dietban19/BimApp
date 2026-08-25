@@ -48,7 +48,9 @@ function getComponentKey(ix: number, iz: number): string {
 }
 
 export function detectRectRooms(wallsIterable: Iterable<WallMesh>): RoomRect[] {
-  const walls = [...wallsIterable].filter((wall) => !wall.isPreview);
+  const walls = [...wallsIterable].filter(
+    (wall) => !wall.isPreview && wall.isRoomBoundary === true,
+  );
 
   if (walls.length < 4) {
     return [];

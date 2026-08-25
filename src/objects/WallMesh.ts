@@ -15,6 +15,7 @@ export interface WallOptions {
   height?: number;
   width?: number;
   isPreview?: boolean;
+  isRoomBoundary?: boolean;
 }
 
 export type WallOrientation = 'x' | 'z';
@@ -34,6 +35,7 @@ export class WallMesh extends BaseMesh {
   height: number;
   width: number;
   readonly isPreview: boolean;
+  isRoomBoundary: boolean;
 
   onOpeningsRemoved?: OpeningsRemovedHandler;
 
@@ -67,6 +69,7 @@ export class WallMesh extends BaseMesh {
     super(new THREE.BoxGeometry(1, 1, 1), defaultMat);
 
     this.isPreview = isPreview;
+    this.isRoomBoundary = options.isRoomBoundary ?? true;
     this.startPoint = options.startPoint.clone();
     this.endPoint = options.endPoint.clone();
     this.height = height;
@@ -128,6 +131,10 @@ export class WallMesh extends BaseMesh {
     this.updateGeometry();
   }
 
+  setRoomBoundary(enabled: boolean): void {
+    this.isRoomBoundary = enabled;
+  }
+
   // --------------------------------
   // Openings
   // --------------------------------
@@ -150,7 +157,12 @@ export class WallMesh extends BaseMesh {
       .filter((opening) => opening !== ignore)
       .map((opening) => opening.getFootprint());
 
-    return validateOpeningPlacement(params, this.getLength(), this.height, others);
+    return validateOpeningPlacement(
+      params,
+      this.getLength(),
+      this.height,
+      others,
+    );
   }
 
   /**

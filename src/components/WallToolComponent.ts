@@ -232,6 +232,14 @@ export class WallToolComponent extends Component {
     }
   }
 
+  setSelectedWallRoomBoundary(enabled: boolean): void {
+    if (!this.selectedWall) return;
+
+    this.selectedWall.setRoomBoundary(enabled);
+    this.rebuildRoomLabels();
+    this.notify();
+  }
+
   deleteSelectedWall(): void {
     if (!this.selectedWall) return;
 

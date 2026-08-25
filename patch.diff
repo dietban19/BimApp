@@ -1,1233 +1,2258 @@
-diff --git a/src/App.tsx b/src/App.tsx
-index b58255e..1fd8b24 100644
---- a/src/App.tsx
-+++ b/src/App.tsx
-@@ -1,15 +1,18 @@
--import { useEffect, useRef } from 'react';
-+import { useEffect, useRef, useState } from 'react';
- 
- import { Engine } from './engine/Engine';
- 
- import { GridComponent } from './components/GridComponent';
- import { OrbitControlsComponent } from './components/OrbitControlsComponent';
- import { RaycastComponent } from './components/RaycastComponent';
-+import { WallToolComponent } from './components/WallToolComponent';
-+import { UIOverlay } from './ui/UIOverlay';
- 
- import './App.css';
- 
- function App() {
-   const containerRef = useRef<HTMLDivElement>(null);
-+  const [wallTool, setWallTool] = useState<WallToolComponent | null>(null);
- 
-   useEffect(() => {
-     const container = containerRef.current;
-@@ -34,7 +37,6 @@ function App() {
-       near: 0.1,
-       far: 1000,
-     });
--    console.log(world);
- 
-     // --------------------------------
-     // World components
-@@ -56,6 +58,9 @@ function App() {
-       enableDamping: true,
-     });
- 
-+    const wallToolComp = world.add(WallToolComponent);
-+    setWallTool(wallToolComp);
-+
-     // --------------------------------
-     // Start application
-     // --------------------------------
-@@ -67,6 +72,7 @@ function App() {
-     // --------------------------------
- 
-     return () => {
-+      setWallTool(null);
-       engine.dispose();
-     };
-   }, []);
-@@ -74,6 +80,7 @@ function App() {
-   return (
-     <main className="app">
-       <div ref={containerRef} className="three-container" />
-+      <UIOverlay wallTool={wallTool} />
-     </main>
-   );
- }
 diff --git a/src/components/WallToolComponent.ts b/src/components/WallToolComponent.ts
-new file mode 100644
-index 0000000..8e20e4d
---- /dev/null
+index 8e20e4d..1728610 100644
+--- a/src/components/WallToolComponent.ts
 +++ b/src/components/WallToolComponent.ts
-@@ -0,0 +1,377 @@
-+import * as THREE from 'three';
-+import { Component } from '../engine/Component';
-+import { GridComponent } from './GridComponent';
-+import { RaycastComponent } from './RaycastComponent';
-+import { WallMesh } from '../objects/WallMesh';
-+import { calculateWallJunctions } from '../utils/junctions';
-+
-+export type ToolMode = 'select' | 'add-wall';
-+export type PlacementState = 'idle' | 'picking-end';
-+
-+export class WallToolComponent extends Component {
-+  mode: ToolMode = 'select';
-+  placementState: PlacementState = 'idle';
-+
-+  readonly walls = new Set<WallMesh>();
-+  selectedWall: WallMesh | null = null;
-+  hoveredWall: WallMesh | null = null;
-+
-+  defaultHeight = 3.0;
-+  defaultWidth = 0.3;
-+
-+  private gridComponent!: GridComponent;
-+  private raycastComponent!: RaycastComponent;
-+
-+  private startPoint: THREE.Vector3 | null = null;
-+  private previewWall: WallMesh | null = null;
-+
-+  private pointerDownPos: { x: number; y: number } | null = null;
-+
-+  private ambientLight?: THREE.AmbientLight;
-+  private directionalLight?: THREE.DirectionalLight;
-+
-+  private readonly listeners = new Set<() => void>();
-+
-+  subscribe(listener: () => void): () => void {
-+    this.listeners.add(listener);
-+    return () => {
-+      this.listeners.delete(listener);
-+    };
-+  }
-+
-+  private notify(): void {
-+    for (const listener of this.listeners) {
-+      listener();
-+    }
-+  }
-+
-+  init(): void {
-+    this.gridComponent = this.world.get(GridComponent);
-+    this.raycastComponent = this.world.get(RaycastComponent);
-+
-+    this.setupLighting();
-+
-+    const canvas = this.world.renderer.domElement;
-+    canvas.addEventListener('pointerdown', this.handlePointerDown);
-+    canvas.addEventListener('pointermove', this.handlePointerMove);
-+    canvas.addEventListener('pointerup', this.handlePointerUp);
-+    canvas.addEventListener('pointerleave', this.handlePointerLeave);
-+    window.addEventListener('keydown', this.handleKeyDown);
-+  }
-+
-+  setMode(mode: ToolMode): void {
-+    if (this.mode === mode) return;
-+
-+    // Clear placement preview if leaving add-wall
-+    if (this.mode === 'add-wall') {
-+      this.cancelPlacement();
-+    }
-+
-+    // Clear hover/selected state if entering add-wall
-+    if (mode === 'add-wall') {
-+      this.clearHover();
-+      this.deselectWall();
-+    }
-+
-+    this.mode = mode;
-+    this.notify();
-+  }
-+
-+  setSelectedWallHeight(height: number): void {
-+    if (this.selectedWall && height > 0) {
-+      this.selectedWall.setHeight(height);
-+      this.notify();
-+    }
-+  }
-+
-+  setSelectedWallWidth(width: number): void {
-+    if (this.selectedWall && width > 0) {
-+      this.selectedWall.setWidth(width);
-+      // Recalculate preview / junctions if needed, but for existing wall update geometry
-+      this.notify();
-+    }
-+  }
-+
-+  deleteSelectedWall(): void {
-+    if (!this.selectedWall) return;
-+
-+    const wallToDelete = this.selectedWall;
-+    this.deselectWall();
-+
-+    this.walls.delete(wallToDelete);
-+    this.world.removeMesh(wallToDelete);
-+    wallToDelete.dispose();
-+
-+    this.notify();
-+  }
-+
-+  private setupLighting(): void {
-+    // Add lighting if not already present
-+    let hasLight = false;
-+    this.world.scene.traverse((obj) => {
-+      if ((obj as THREE.Light).isLight) {
-+        hasLight = true;
-+      }
-+    });
-+
-+    if (!hasLight) {
-+      this.ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
-+      this.directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-+      this.directionalLight.position.set(10, 20, 15);
-+
-+      this.world.scene.add(this.ambientLight);
-+      this.world.scene.add(this.directionalLight);
-+    }
-+  }
-+
-+  private handlePointerDown = (event: PointerEvent): void => {
-+    if (!this.enabled) return;
-+    this.pointerDownPos = { x: event.clientX, y: event.clientY };
-+  };
-+
-+  private handlePointerMove = (event: PointerEvent): void => {
-+    if (!this.enabled) return;
-+
-+    if (this.mode === 'add-wall') {
-+      this.handleWallPlacementMove(event);
-+    } else if (this.mode === 'select') {
-+      this.handleSelectionMove(event);
-+    }
-+  };
-+
-+  private handleWallPlacementMove(event: PointerEvent): void {
-+    if (this.placementState !== 'picking-end' || !this.startPoint) return;
-+
-+    const cell = this.gridComponent.getCellFromPointer(event);
-+    if (!cell) return;
-+
-+    const currentPos = this.gridComponent.getCellPosition(cell);
-+
-+    // Calculate junction-trimmed wall segment
-+    const junction = calculateWallJunctions(
-+      this.startPoint,
-+      currentPos,
-+      this.defaultWidth,
-+      this.walls,
-+    );
-+
-+    if (!this.previewWall) {
-+      this.previewWall = new WallMesh({
-+        startPoint: junction.start,
-+        endPoint: junction.end,
-+        height: this.defaultHeight,
-+        width: this.defaultWidth,
-+        isPreview: true,
-+      });
-+      this.world.scene.add(this.previewWall);
-+    } else {
-+      this.previewWall.setEndpoints(junction.start, junction.end);
-+    }
-+  }
-+
-+  private handleSelectionMove(event: PointerEvent): void {
-+    const intersections = this.raycastComponent.castWorldMeshes(event);
-+
-+    if (intersections.length > 0) {
-+      const hitObj = intersections[0].object;
-+      if (hitObj instanceof WallMesh && !hitObj.isPreview) {
-+        if (this.hoveredWall !== hitObj) {
-+          this.clearHover();
-+          this.hoveredWall = hitObj;
-+          if (!hitObj.isSelected) {
-+            hitObj.setHovered(true);
-+          }
-+          this.notify();
-+        }
-+        return;
-+      }
-+    }
-+
-+    if (this.hoveredWall) {
-+      this.clearHover();
-+      this.notify();
-+    }
-+  }
-+
-+  private handlePointerUp = (event: PointerEvent): void => {
-+    if (!this.enabled || !this.pointerDownPos) return;
-+
-+    const dragDist = Math.hypot(
-+      event.clientX - this.pointerDownPos.x,
-+      event.clientY - this.pointerDownPos.y,
-+    );
-+
-+    this.pointerDownPos = null;
-+
-+    // Ignore drag events (e.g. OrbitControls navigation)
-+    if (dragDist > 5) return;
-+
-+    if (this.mode === 'add-wall') {
-+      this.handleWallPlacementClick(event);
-+    } else if (this.mode === 'select') {
-+      this.handleSelectionClick(event);
-+    }
-+  };
-+
-+  private handleWallPlacementClick(event: PointerEvent): void {
-+    const cell = this.gridComponent.getCellFromPointer(event);
-+    if (!cell) return;
-+
-+    const clickPos = this.gridComponent.getCellPosition(cell);
-+
-+    if (this.placementState === 'idle') {
-+      this.startPoint = clickPos;
-+      this.placementState = 'picking-end';
-+
-+      // Create initial preview wall
-+      this.previewWall = new WallMesh({
-+        startPoint: clickPos,
-+        endPoint: clickPos,
-+        height: this.defaultHeight,
-+        width: this.defaultWidth,
-+        isPreview: true,
-+      });
-+      this.world.scene.add(this.previewWall);
-+
-+      this.notify();
-+    } else if (this.placementState === 'picking-end' && this.startPoint) {
-+      const junction = calculateWallJunctions(
-+        this.startPoint,
-+        clickPos,
-+        this.defaultWidth,
-+        this.walls,
-+      );
-+
-+      const length = junction.start.distanceTo(junction.end);
-+
-+      if (length > 0.05) {
-+        // Place permanent wall
-+        const newWall = new WallMesh({
-+          startPoint: junction.start,
-+          endPoint: junction.end,
-+          height: this.defaultHeight,
-+          width: this.defaultWidth,
-+          isPreview: false,
-+        });
-+
-+        this.walls.add(newWall);
-+        this.world.scene.add(newWall);
-+        this.world.meshes.add(newWall);
-+      }
-+
-+      // Cleanup preview
-+      this.cancelPlacement();
-+      this.notify();
-+    }
-+  }
-+
-+  private handleSelectionClick(event: PointerEvent): void {
-+    const intersections = this.raycastComponent.castWorldMeshes(event);
-+
-+    if (intersections.length > 0) {
-+      const hitObj = intersections[0].object;
-+      if (hitObj instanceof WallMesh && !hitObj.isPreview) {
-+        this.selectWall(hitObj);
-+        return;
-+      }
-+    }
-+
-+    // Clicked empty space
-+    this.deselectWall();
-+  }
-+
-+  private handlePointerLeave = (): void => {
-+    if (this.hoveredWall) {
-+      this.clearHover();
-+      this.notify();
-+    }
-+  };
-+
-+  private handleKeyDown = (event: KeyboardEvent): void => {
-+    if (event.key === 'Escape') {
-+      if (this.placementState === 'picking-end') {
-+        this.cancelPlacement();
-+        this.notify();
-+      } else if (this.selectedWall) {
-+        this.deselectWall();
-+      }
-+    } else if (event.key === 'Delete' || event.key === 'Backspace') {
-+      // Avoid deleting if user is typing in an input field
-+      const activeEl = document.activeElement;
-+      const isInput = activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA');
-+      if (!isInput && this.selectedWall) {
-+        this.deleteSelectedWall();
-+      }
-+    }
-+  };
-+
-+  private selectWall(wall: WallMesh): void {
-+    if (this.selectedWall === wall) return;
-+
-+    if (this.selectedWall) {
-+      this.selectedWall.setSelected(false);
-+    }
-+
-+    this.selectedWall = wall;
-+    wall.setSelected(true);
-+    this.notify();
-+  }
-+
-+  private deselectWall(): void {
-+    if (this.selectedWall) {
-+      this.selectedWall.setSelected(false);
-+      this.selectedWall = null;
-+      this.notify();
-+    }
-+  }
-+
-+  private clearHover(): void {
-+    if (this.hoveredWall) {
-+      if (!this.hoveredWall.isSelected) {
-+        this.hoveredWall.setHovered(false);
-+      }
-+      this.hoveredWall = null;
-+    }
-+  }
-+
-+  private cancelPlacement(): void {
-+    this.placementState = 'idle';
-+    this.startPoint = null;
-+
-+    if (this.previewWall) {
-+      this.world.scene.remove(this.previewWall);
-+      this.previewWall.dispose();
-+      this.previewWall = null;
-+    }
-+  }
-+
-+  dispose(): void {
-+    const canvas = this.world.renderer.domElement;
-+    canvas.removeEventListener('pointerdown', this.handlePointerDown);
-+    canvas.removeEventListener('pointermove', this.handlePointerMove);
-+    canvas.removeEventListener('pointerup', this.handlePointerUp);
-+    canvas.removeEventListener('pointerleave', this.handlePointerLeave);
-+    window.removeEventListener('keydown', this.handleKeyDown);
-+
+@@ -3,18 +3,61 @@ import { Component } from '../engine/Component';
+ import { GridComponent } from './GridComponent';
+ import { RaycastComponent } from './RaycastComponent';
+ import { WallMesh } from '../objects/WallMesh';
++import { Opening } from '../objects/openings/Opening';
++import {
++  createDefaultOpeningParams,
++  createOpening,
++} from '../objects/openings/OpeningFactory';
+ import { calculateWallJunctions } from '../utils/junctions';
++import type { OpeningParams, OpeningType } from '../types/Opening';
+ 
+-export type ToolMode = 'select' | 'add-wall';
++export type ToolMode = 'select' | 'add-wall' | 'add-door' | 'add-window';
+ export type PlacementState = 'idle' | 'picking-end';
+ 
++/** Anything the user can select in the scene. */
++export type Selectable = WallMesh | Opening;
++
++/**
++ * Placement modes that cut an opening into an existing wall, mapped to the
++ * kind of opening they create.
++ */
++const OPENING_MODES: Readonly<Partial<Record<ToolMode, OpeningType>>> = {
++  'add-door': 'door',
++  'add-window': 'window',
++};
++
++/** Openings snap to this increment along the wall. */
++const OPENING_SNAP = 0.05;
++
++function getOpeningTypeForMode(mode: ToolMode): OpeningType | null {
++  return OPENING_MODES[mode] ?? null;
++}
++
++interface WallSurfaceHit {
++  wall: WallMesh;
++  distanceAlongWall: number;
++}
++
+ export class WallToolComponent extends Component {
+   mode: ToolMode = 'select';
+   placementState: PlacementState = 'idle';
+ 
+   readonly walls = new Set<WallMesh>();
++
+   selectedWall: WallMesh | null = null;
++  selectedOpening: Opening | null = null;
++
+   hoveredWall: WallMesh | null = null;
++  hoveredOpening: Opening | null = null;
++
++  /** True while the opening ghost under the cursor could actually be placed. */
++  openingPreviewValid = false;
++
++  /** Why the opening ghost cannot be placed, if it cannot. */
++  openingPreviewMessage: string | null = null;
++
++  /** Why the last opening property edit was rejected, if it was. */
++  openingEditError: string | null = null;
+ 
+   defaultHeight = 3.0;
+   defaultWidth = 0.3;
+@@ -25,6 +68,9 @@ export class WallToolComponent extends Component {
+   private startPoint: THREE.Vector3 | null = null;
+   private previewWall: WallMesh | null = null;
+ 
++  private previewOpening: Opening | null = null;
++  private previewOpeningWall: WallMesh | null = null;
++
+   private pointerDownPos: { x: number; y: number } | null = null;
+ 
+   private ambientLight?: THREE.AmbientLight;
+@@ -62,21 +108,24 @@ export class WallToolComponent extends Component {
+   setMode(mode: ToolMode): void {
+     if (this.mode === mode) return;
+ 
+-    // Clear placement preview if leaving add-wall
+-    if (this.mode === 'add-wall') {
+-      this.cancelPlacement();
+-    }
++    // Never leave half finished placement state behind when switching tools.
 +    this.cancelPlacement();
-+    this.deselectWall();
++    this.clearOpeningPreview();
+ 
+-    // Clear hover/selected state if entering add-wall
+-    if (mode === 'add-wall') {
+-      this.clearHover();
+-      this.deselectWall();
++    // Only the select tool works with hover / selection highlighting.
++    if (mode !== 'select') {
++      this.setHover(null);
++      this.setSelection(null);
+     }
+ 
+     this.mode = mode;
+     this.notify();
+   }
+ 
++  // --------------------------------
++  // Wall properties
++  // --------------------------------
 +
-+    for (const wall of this.walls) {
-+      this.world.removeMesh(wall);
-+      wall.dispose();
-+    }
-+    this.walls.clear();
-+
-+    if (this.ambientLight) {
-+      this.world.scene.remove(this.ambientLight);
-+      this.ambientLight.dispose();
-+    }
-+
-+    if (this.directionalLight) {
-+      this.world.scene.remove(this.directionalLight);
-+      this.directionalLight.dispose();
-+    }
-+
-+    this.listeners.clear();
-+  }
-+}
-diff --git a/src/objects/BaseMesh.ts b/src/objects/BaseMesh.ts
-new file mode 100644
-index 0000000..2addf48
---- /dev/null
-+++ b/src/objects/BaseMesh.ts
-@@ -0,0 +1,74 @@
-+import * as THREE from 'three';
-+
-+export abstract class BaseMesh extends THREE.Mesh {
-+  readonly meshId: string = crypto.randomUUID();
-+  
-+  isSelected = false;
-+  isHovered = false;
-+
-+  protected defaultMaterial: THREE.Material;
-+  protected hoverMaterial: THREE.Material;
-+  protected selectMaterial: THREE.Material;
-+
-+  constructor(
-+    geometry?: THREE.BufferGeometry,
-+    material?: THREE.Material | THREE.Material[],
-+  ) {
-+    const baseMat = Array.isArray(material) ? material[0] : material;
-+    const defaultMat = baseMat ?? new THREE.MeshStandardMaterial({ color: 0xcccccc });
-+
-+    super(geometry, defaultMat);
-+
-+    this.defaultMaterial = defaultMat;
-+    this.hoverMaterial = new THREE.MeshStandardMaterial({ color: 0x64b5f6 });
-+    this.selectMaterial = new THREE.MeshStandardMaterial({ color: 0xffb74d });
+   setSelectedWallHeight(height: number): void {
+     if (this.selectedWall && height > 0) {
+       this.selectedWall.setHeight(height);
+@@ -95,16 +144,132 @@ export class WallToolComponent extends Component {
+   deleteSelectedWall(): void {
+     if (!this.selectedWall) return;
+ 
+-    const wallToDelete = this.selectedWall;
+-    this.deselectWall();
++    this.deleteWall(this.selectedWall);
 +  }
 +
-+  setSelected(selected: boolean): void {
-+    if (this.isSelected === selected) return;
-+    this.isSelected = selected;
-+    this.updateMaterialState();
-+  }
++  deleteWall(wall: WallMesh): void {
++    if (!this.walls.has(wall)) return;
 +
-+  setHovered(hovered: boolean): void {
-+    if (this.isHovered === hovered) return;
-+    this.isHovered = hovered;
-+    this.updateMaterialState();
-+  }
-+
-+  protected updateMaterialState(): void {
-+    if (this.isSelected) {
-+      this.material = this.selectMaterial;
-+    } else if (this.isHovered) {
-+      this.material = this.hoverMaterial;
-+    } else {
-+      this.material = this.defaultMaterial;
-+    }
-+  }
-+
-+  dispose(): void {
-+    if (this.geometry) {
-+      this.geometry.dispose();
++    if (this.previewOpeningWall === wall) {
++      this.clearOpeningPreview();
 +    }
 +
-+    this.disposeMaterial(this.defaultMaterial);
-+    this.disposeMaterial(this.hoverMaterial);
-+    this.disposeMaterial(this.selectMaterial);
-+
-+    if (Array.isArray(this.material)) {
-+      for (const mat of this.material) {
-+        mat.dispose();
-+      }
-+    } else if (this.material) {
-+      this.material.dispose();
-+    }
-+  }
-+
-+  private disposeMaterial(material: THREE.Material): void {
-+    if (material) {
-+      material.dispose();
-+    }
-+  }
-+}
-+
-+export type BaseMeshComponent = BaseMesh;
-diff --git a/src/objects/WallMesh.ts b/src/objects/WallMesh.ts
-new file mode 100644
-index 0000000..cd4ee0b
---- /dev/null
-+++ b/src/objects/WallMesh.ts
-@@ -0,0 +1,184 @@
-+import * as THREE from 'three';
-+import { BaseMesh } from './BaseMesh';
-+
-+export interface WallOptions {
-+  startPoint: THREE.Vector3;
-+  endPoint: THREE.Vector3;
-+  height?: number;
-+  width?: number;
-+  isPreview?: boolean;
-+}
-+
-+export type WallOrientation = 'x' | 'z';
-+
-+export class WallMesh extends BaseMesh {
-+  startPoint: THREE.Vector3;
-+  endPoint: THREE.Vector3;
-+  height: number;
-+  width: number;
-+  readonly isPreview: boolean;
-+
-+  private edgesMesh?: THREE.LineSegments;
-+
-+  constructor(options: WallOptions) {
-+    const isPreview = options.isPreview ?? false;
-+    const height = options.height ?? 3.0;
-+    const width = options.width ?? 0.3;
-+
-+    let defaultMat: THREE.Material;
-+    if (isPreview) {
-+      defaultMat = new THREE.MeshStandardMaterial({
-+        color: 0x3b82f6,
-+        transparent: true,
-+        opacity: 0.55,
-+        depthWrite: false,
-+        roughness: 0.3,
-+      });
-+    } else {
-+      defaultMat = new THREE.MeshStandardMaterial({
-+        color: 0xd1d5db,
-+        roughness: 0.5,
-+        metalness: 0.1,
-+      });
++    if (this.selectedWall === wall || this.selectedOpening?.wall === wall) {
++      this.setSelection(null);
 +    }
 +
-+    super(new THREE.BoxGeometry(1, 1, 1), defaultMat);
-+
-+    this.isPreview = isPreview;
-+    this.startPoint = options.startPoint.clone();
-+    this.endPoint = options.endPoint.clone();
-+    this.height = height;
-+    this.width = width;
-+
-+    if (!isPreview) {
-+      this.hoverMaterial = new THREE.MeshStandardMaterial({
-+        color: 0x60a5fa,
-+        roughness: 0.4,
-+      });
-+      this.selectMaterial = new THREE.MeshStandardMaterial({
-+        color: 0xf59e0b,
-+        roughness: 0.4,
-+      });
-+
-+      // Edge outline for crisp appearance
-+      const edgeGeo = new THREE.EdgesGeometry(this.geometry);
-+      const edgeMat = new THREE.LineBasicMaterial({
-+        color: 0x374151,
-+        linewidth: 1,
-+      });
-+      this.edgesMesh = new THREE.LineSegments(edgeGeo, edgeMat);
-+      this.add(this.edgesMesh);
++    if (this.hoveredWall === wall || this.hoveredOpening?.wall === wall) {
++      this.setHover(null);
 +    }
 +
-+    this.updateGeometry();
-+  }
-+
-+  getOrientation(): WallOrientation {
-+    const dx = Math.abs(this.endPoint.x - this.startPoint.x);
-+    const dz = Math.abs(this.endPoint.z - this.startPoint.z);
-+    return dx >= dz ? 'x' : 'z';
-+  }
-+
-+  getLength(): number {
-+    const orientation = this.getOrientation();
-+    if (orientation === 'x') {
-+      return Math.abs(this.endPoint.x - this.startPoint.x);
-+    } else {
-+      return Math.abs(this.endPoint.z - this.startPoint.z);
-+    }
-+  }
-+
-+  setEndpoints(start: THREE.Vector3, end: THREE.Vector3): void {
-+    this.startPoint.copy(start);
-+    this.endPoint.copy(end);
-+    this.updateGeometry();
-+  }
-+
-+  setHeight(h: number): void {
-+    if (h <= 0 || !Number.isFinite(h)) return;
-+    this.height = h;
-+    this.updateGeometry();
-+  }
-+
-+  setWidth(w: number): void {
-+    if (w <= 0 || !Number.isFinite(w)) return;
-+    this.width = w;
-+    this.updateGeometry();
-+  }
-+
-+  updateGeometry(): void {
-+    const orientation = this.getOrientation();
-+    const length = this.getLength();
-+
-+    // Prevent 0-dimension geometry errors
-+    const safeLength = Math.max(length, 0.001);
-+    const safeHeight = Math.max(this.height, 0.01);
-+    const safeWidth = Math.max(this.width, 0.01);
-+
-+    let dimX: number;
-+    let dimZ: number;
-+
-+    if (orientation === 'x') {
-+      dimX = safeLength;
-+      dimZ = safeWidth;
-+    } else {
-+      dimX = safeWidth;
-+      dimZ = safeLength;
++    // The openings live inside the wall, so unregister them before disposal.
++    for (const opening of wall.openings) {
++      this.world.meshes.delete(opening);
 +    }
 +
-+    const newGeo = new THREE.BoxGeometry(dimX, safeHeight, dimZ);
++    this.walls.delete(wall);
++    this.world.removeMesh(wall);
++    wall.dispose();
 +
-+    if (this.geometry) {
-+      this.geometry.dispose();
++    this.notify();
++  }
++
++  // --------------------------------
++  // Opening properties
++  // --------------------------------
++
++  setSelectedOpeningWidth(width: number): void {
++    this.updateSelectedOpening({ width });
++  }
++
++  setSelectedOpeningHeight(height: number): void {
++    this.updateSelectedOpening({ height });
++  }
++
++  setSelectedOpeningSillHeight(sillHeight: number): void {
++    this.updateSelectedOpening({ sillHeight });
++  }
++
++  setSelectedOpeningDistance(distanceAlongWall: number): void {
++    this.updateSelectedOpening({ distanceAlongWall });
++  }
++
++  private updateSelectedOpening(patch: Partial<OpeningParams>): void {
++    const opening = this.selectedOpening;
++    const wall = opening?.wall;
++
++    if (!opening || !wall) return;
++
++    const params: OpeningParams = { ...opening.getParams(), ...patch };
++    const validation = wall.canPlaceOpening(params, opening);
++
++    if (!validation.valid) {
++      this.openingEditError = validation.reason;
++      this.notify();
++      return;
 +    }
-+    this.geometry = newGeo;
 +
-+    // Calculate center position
-+    const midX = (this.startPoint.x + this.endPoint.x) / 2;
-+    const midY = safeHeight / 2;
-+    const midZ = (this.startPoint.z + this.endPoint.z) / 2;
++    wall.updateOpening(opening, params);
++    this.openingEditError = null;
++    this.notify();
++  }
 +
-+    this.position.set(midX, midY, midZ);
-+
-+    if (this.edgesMesh) {
-+      if (this.edgesMesh.geometry) {
-+        this.edgesMesh.geometry.dispose();
-+      }
-+      this.edgesMesh.geometry = new THREE.EdgesGeometry(newGeo);
++  deleteSelectedOpening(): void {
++    if (this.selectedOpening) {
++      this.deleteOpening(this.selectedOpening);
 +    }
 +  }
 +
 +  /**
-+   * Returns Axis-Aligned Bounding Box (AABB) in XZ ground plane.
++   * Removes an opening and makes that section of the wall solid again.
 +   */
-+  getXZBounds(): { minX: number; maxX: number; minZ: number; maxZ: number } {
-+    const orientation = this.getOrientation();
-+    const halfW = this.width / 2;
++  deleteOpening(opening: Opening): void {
++    const wall = opening.wall;
 +
-+    if (orientation === 'x') {
-+      const minX = Math.min(this.startPoint.x, this.endPoint.x);
-+      const maxX = Math.max(this.startPoint.x, this.endPoint.x);
-+      const minZ = this.startPoint.z - halfW;
-+      const maxZ = this.startPoint.z + halfW;
-+      return { minX, maxX, minZ, maxZ };
-+    } else {
-+      const minZ = Math.min(this.startPoint.z, this.endPoint.z);
-+      const maxZ = Math.max(this.startPoint.z, this.endPoint.z);
-+      const minX = this.startPoint.x - halfW;
-+      const maxX = this.startPoint.x + halfW;
-+      return { minX, maxX, minZ, maxZ };
++    if (!wall) return;
++
++    if (this.selectedOpening === opening) {
++      this.setSelection(null);
 +    }
+ 
+-    this.walls.delete(wallToDelete);
+-    this.world.removeMesh(wallToDelete);
+-    wallToDelete.dispose();
++    if (this.hoveredOpening === opening) {
++      this.setHover(null);
++    }
++
++    wall.removeOpening(opening);
++    this.releaseOpening(opening);
+ 
+     this.notify();
+   }
+ 
++  /**
++   * Unregisters a detached opening from the world and frees its resources.
++   */
++  private releaseOpening(opening: Opening): void {
++    this.world.removeMesh(opening);
++    opening.dispose();
++  }
++
++  /**
++   * Called by a wall when a change (height, thickness, ...) invalidated some
++   * of its openings.
++   */
++  private handleOpeningsRemoved = (openings: Opening[]): void => {
++    for (const opening of openings) {
++      if (this.selectedOpening === opening) {
++        this.setSelection(null);
++      }
++
++      if (this.hoveredOpening === opening) {
++        this.setHover(null);
++      }
++
++      this.releaseOpening(opening);
++    }
++
++    this.notify();
++  };
++
+   private setupLighting(): void {
+     // Add lighting if not already present
+     let hasLight = false;
+@@ -132,8 +297,12 @@ export class WallToolComponent extends Component {
+   private handlePointerMove = (event: PointerEvent): void => {
+     if (!this.enabled) return;
+ 
++    const openingType = getOpeningTypeForMode(this.mode);
++
+     if (this.mode === 'add-wall') {
+       this.handleWallPlacementMove(event);
++    } else if (openingType) {
++      this.handleOpeningPlacementMove(event, openingType);
+     } else if (this.mode === 'select') {
+       this.handleSelectionMove(event);
+     }
+@@ -169,30 +338,161 @@ export class WallToolComponent extends Component {
+     }
+   }
+ 
+-  private handleSelectionMove(event: PointerEvent): void {
++  // --------------------------------
++  // Opening placement
++  // --------------------------------
++
++  /**
++   * Finds the first real wall under the pointer and converts the hit into a
++   * position along that wall. Openings already placed in the wall are skipped
++   * so the user can keep aiming at the wall behind them.
++   */
++  private pickWallSurface(event: PointerEvent): WallSurfaceHit | null {
+     const intersections = this.raycastComponent.castWorldMeshes(event);
+ 
+-    if (intersections.length > 0) {
+-      const hitObj = intersections[0].object;
+-      if (hitObj instanceof WallMesh && !hitObj.isPreview) {
+-        if (this.hoveredWall !== hitObj) {
+-          this.clearHover();
+-          this.hoveredWall = hitObj;
+-          if (!hitObj.isSelected) {
+-            hitObj.setHovered(true);
+-          }
+-          this.notify();
+-        }
+-        return;
++    for (const intersection of intersections) {
++      const object = intersection.object;
++
++      if (object instanceof WallMesh && !object.isPreview) {
++        const raw = object.getDistanceAlongWall(intersection.point);
++
++        return {
++          wall: object,
++          distanceAlongWall: Math.round(raw / OPENING_SNAP) * OPENING_SNAP,
++        };
+       }
+     }
+ 
+-    if (this.hoveredWall) {
+-      this.clearHover();
++    return null;
++  }
++
++  private handleOpeningPlacementMove(
++    event: PointerEvent,
++    type: OpeningType,
++  ): void {
++    const hit = this.pickWallSurface(event);
++
++    if (!hit) {
++      if (this.clearOpeningPreview()) {
++        this.notify();
++      }
++      return;
++    }
++
++    const params = createDefaultOpeningParams(type, hit.distanceAlongWall);
++
++    this.showOpeningPreview(type, hit.wall, params);
++  }
++
++  private showOpeningPreview(
++    type: OpeningType,
++    wall: WallMesh,
++    params: OpeningParams,
++  ): void {
++    if (this.previewOpening && this.previewOpening.type !== type) {
++      this.clearOpeningPreview();
++    }
++
++    let needsRebuild = false;
++
++    if (!this.previewOpening) {
++      this.previewOpening = createOpening(type, params, true);
++      needsRebuild = true;
++    }
++
++    if (this.previewOpeningWall !== wall) {
++      this.previewOpeningWall?.remove(this.previewOpening);
++      wall.add(this.previewOpening);
++      this.previewOpening.setWall(wall);
++      this.previewOpeningWall = wall;
++      needsRebuild = true;
++    }
++
++    if (needsRebuild) {
++      // Geometry depends on the host wall's thickness and length.
++      this.previewOpening.setParams(params);
++      this.previewOpening.build();
++    } else {
++      // Sliding along the same wall only needs a transform update.
++      this.previewOpening.setDistanceAlongWall(params.distanceAlongWall);
++    }
++
++    this.refreshOpeningPreviewValidity();
++  }
++
++  private refreshOpeningPreviewValidity(): void {
++    const preview = this.previewOpening;
++    const wall = this.previewOpeningWall;
++
++    if (!preview || !wall) return;
++
++    const validation = wall.canPlaceOpening(preview.getParams());
++    const message = validation.valid ? null : validation.reason;
++
++    preview.setPreviewValid(validation.valid);
++
++    if (
++      this.openingPreviewValid !== validation.valid ||
++      this.openingPreviewMessage !== message
++    ) {
++      this.openingPreviewValid = validation.valid;
++      this.openingPreviewMessage = message;
+       this.notify();
+     }
+   }
+ 
++  /**
++   * Removes the opening ghost. Returns true when something actually changed.
++   */
++  private clearOpeningPreview(): boolean {
++    const hadPreview = this.previewOpening !== null;
++
++    if (this.previewOpening) {
++      this.previewOpeningWall?.remove(this.previewOpening);
++      this.previewOpening.setWall(null);
++      this.previewOpening.dispose();
++    }
++
++    this.previewOpening = null;
++    this.previewOpeningWall = null;
++
++    const hadMessage = this.openingPreviewMessage !== null;
++
++    this.openingPreviewValid = false;
++    this.openingPreviewMessage = null;
++
++    return hadPreview || hadMessage;
++  }
++
++  private handleOpeningPlacementClick(
++    event: PointerEvent,
++    type: OpeningType,
++  ): void {
++    const hit = this.pickWallSurface(event);
++
++    if (!hit) return;
++
++    const params = createDefaultOpeningParams(type, hit.distanceAlongWall);
++    const opening = createOpening(type, params, false);
++
++    if (!hit.wall.addOpening(opening)) {
++      // Invalid placement leaves the wall completely untouched.
++      opening.dispose();
++      this.refreshOpeningPreviewValidity();
++      return;
++    }
++
++    this.world.meshes.add(opening);
++
++    // The ghost now overlaps the opening that was just placed.
++    this.refreshOpeningPreviewValidity();
++    this.notify();
++  }
++
++  private handleSelectionMove(event: PointerEvent): void {
++    this.setHover(this.pickSelectable(event));
++  }
++
+   private handlePointerUp = (event: PointerEvent): void => {
+     if (!this.enabled || !this.pointerDownPos) return;
+ 
+@@ -206,8 +506,12 @@ export class WallToolComponent extends Component {
+     // Ignore drag events (e.g. OrbitControls navigation)
+     if (dragDist > 5) return;
+ 
++    const openingType = getOpeningTypeForMode(this.mode);
++
+     if (this.mode === 'add-wall') {
+       this.handleWallPlacementClick(event);
++    } else if (openingType) {
++      this.handleOpeningPlacementClick(event, openingType);
+     } else if (this.mode === 'select') {
+       this.handleSelectionClick(event);
+     }
+@@ -254,6 +558,8 @@ export class WallToolComponent extends Component {
+           isPreview: false,
+         });
+ 
++        newWall.onOpeningsRemoved = this.handleOpeningsRemoved;
++
+         this.walls.add(newWall);
+         this.world.scene.add(newWall);
+         this.world.meshes.add(newWall);
+@@ -265,24 +571,40 @@ export class WallToolComponent extends Component {
+     }
+   }
+ 
+-  private handleSelectionClick(event: PointerEvent): void {
++  /**
++   * Returns the wall or opening under the pointer, openings taking precedence
++   * because they sit inside the wall's hole.
++   */
++  private pickSelectable(event: PointerEvent): Selectable | null {
+     const intersections = this.raycastComponent.castWorldMeshes(event);
+ 
+-    if (intersections.length > 0) {
+-      const hitObj = intersections[0].object;
+-      if (hitObj instanceof WallMesh && !hitObj.isPreview) {
+-        this.selectWall(hitObj);
+-        return;
++    for (const intersection of intersections) {
++      const object = intersection.object;
++
++      if (object instanceof Opening && !object.isPreview) {
++        return object;
++      }
++
++      if (object instanceof WallMesh && !object.isPreview) {
++        return object;
+       }
+     }
+ 
+-    // Clicked empty space
+-    this.deselectWall();
++    return null;
++  }
++
++  private handleSelectionClick(event: PointerEvent): void {
++    this.setSelection(this.pickSelectable(event));
+   }
+ 
+   private handlePointerLeave = (): void => {
+-    if (this.hoveredWall) {
+-      this.clearHover();
++    const previewChanged = this.clearOpeningPreview();
++    const hadHover = this.hoveredWall !== null || this.hoveredOpening !== null;
++
++    // setHover notifies on its own when the hover target actually changed.
++    this.setHover(null);
++
++    if (previewChanged && !hadHover) {
+       this.notify();
+     }
+   };
+@@ -292,46 +614,63 @@ export class WallToolComponent extends Component {
+       if (this.placementState === 'picking-end') {
+         this.cancelPlacement();
+         this.notify();
+-      } else if (this.selectedWall) {
+-        this.deselectWall();
++      } else if (this.previewOpening) {
++        this.clearOpeningPreview();
++        this.notify();
++      } else if (this.selectedWall || this.selectedOpening) {
++        this.setSelection(null);
+       }
+     } else if (event.key === 'Delete' || event.key === 'Backspace') {
+       // Avoid deleting if user is typing in an input field
+       const activeEl = document.activeElement;
+       const isInput = activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA');
+-      if (!isInput && this.selectedWall) {
++      if (isInput) return;
++
++      if (this.selectedOpening) {
++        this.deleteSelectedOpening();
++      } else if (this.selectedWall) {
+         this.deleteSelectedWall();
+       }
+     }
+   };
+ 
+-  private selectWall(wall: WallMesh): void {
+-    if (this.selectedWall === wall) return;
++  // --------------------------------
++  // Selection / hover
++  // --------------------------------
+ 
+-    if (this.selectedWall) {
+-      this.selectedWall.setSelected(false);
+-    }
++  private setSelection(target: Selectable | null): void {
++    const current: Selectable | null = this.selectedOpening ?? this.selectedWall;
++
++    if (current === target) return;
++
++    current?.setSelected(false);
++
++    this.selectedWall = target instanceof WallMesh ? target : null;
++    this.selectedOpening = target instanceof Opening ? target : null;
++    this.openingEditError = null;
++
++    target?.setSelected(true);
+ 
+-    this.selectedWall = wall;
+-    wall.setSelected(true);
+     this.notify();
+   }
+ 
+-  private deselectWall(): void {
+-    if (this.selectedWall) {
+-      this.selectedWall.setSelected(false);
+-      this.selectedWall = null;
+-      this.notify();
++  private setHover(target: Selectable | null): void {
++    const current: Selectable | null = this.hoveredOpening ?? this.hoveredWall;
++
++    if (current === target) return;
++
++    if (current && !current.isSelected) {
++      current.setHovered(false);
+     }
+-  }
+ 
+-  private clearHover(): void {
+-    if (this.hoveredWall) {
+-      if (!this.hoveredWall.isSelected) {
+-        this.hoveredWall.setHovered(false);
+-      }
+-      this.hoveredWall = null;
++    this.hoveredWall = target instanceof WallMesh ? target : null;
++    this.hoveredOpening = target instanceof Opening ? target : null;
++
++    if (target && !target.isSelected) {
++      target.setHovered(true);
+     }
++
++    this.notify();
+   }
+ 
+   private cancelPlacement(): void {
+@@ -354,9 +693,14 @@ export class WallToolComponent extends Component {
+     window.removeEventListener('keydown', this.handleKeyDown);
+ 
+     this.cancelPlacement();
+-    this.deselectWall();
++    this.clearOpeningPreview();
++    this.setSelection(null);
+ 
+     for (const wall of this.walls) {
++      for (const opening of wall.openings) {
++        this.world.meshes.delete(opening);
++      }
++
+       this.world.removeMesh(wall);
+       wall.dispose();
+     }
+diff --git a/src/objects/WallMesh.ts b/src/objects/WallMesh.ts
+index cd4ee0b..280aec9 100644
+--- a/src/objects/WallMesh.ts
++++ b/src/objects/WallMesh.ts
+@@ -1,5 +1,13 @@
+ import * as THREE from 'three';
++
+ import { BaseMesh } from './BaseMesh';
++import type { Opening } from './openings/Opening';
++import { createProfileGeometry } from '../utils/profileGeometry';
++import {
++  validateOpeningPlacement,
++  type OpeningValidation,
++} from '../utils/openingLayout';
++import type { OpeningParams } from '../types/Opening';
+ 
+ export interface WallOptions {
+   startPoint: THREE.Vector3;
+@@ -11,6 +19,15 @@ export interface WallOptions {
+ 
+ export type WallOrientation = 'x' | 'z';
+ 
++/**
++ * Notified when openings had to be dropped because the wall no longer fits
++ * them (for example after the height was reduced).
++ *
++ * The wall detaches them from the scene graph but leaves ownership of the
++ * disposal and of any world registration to the caller that placed them.
++ */
++export type OpeningsRemovedHandler = (openings: Opening[]) => void;
++
+ export class WallMesh extends BaseMesh {
+   startPoint: THREE.Vector3;
+   endPoint: THREE.Vector3;
+@@ -18,8 +35,13 @@ export class WallMesh extends BaseMesh {
+   width: number;
+   readonly isPreview: boolean;
+ 
++  onOpeningsRemoved?: OpeningsRemovedHandler;
++
+   private edgesMesh?: THREE.LineSegments;
+ 
++  /** Openings that belong to this wall, in placement order. */
++  private readonly openingList: Opening[] = [];
++
+   constructor(options: WallOptions) {
+     const isPreview = options.isPreview ?? false;
+     const height = options.height ?? 3.0;
+@@ -106,39 +128,180 @@ export class WallMesh extends BaseMesh {
+     this.updateGeometry();
+   }
+ 
++  // --------------------------------
++  // Openings
++  // --------------------------------
++
++  /**
++   * The doors and windows that currently belong to this wall.
++   */
++  get openings(): readonly Opening[] {
++    return this.openingList;
++  }
++
++  /**
++   * Checks whether an opening description fits this wall.
++   *
++   * `ignore` lets an existing opening be re-validated against its siblings
++   * without clashing with its own current footprint.
++   */
++  canPlaceOpening(params: OpeningParams, ignore?: Opening): OpeningValidation {
++    const others = this.openingList
++      .filter((opening) => opening !== ignore)
++      .map((opening) => opening.getFootprint());
++
++    return validateOpeningPlacement(params, this.getLength(), this.height, others);
++  }
++
++  /**
++   * Cuts an opening into this wall.
++   *
++   * Returns false and leaves the wall untouched when the placement is invalid.
++   */
++  addOpening(opening: Opening): boolean {
++    if (this.isPreview || this.openingList.includes(opening)) {
++      return false;
++    }
++
++    if (!this.canPlaceOpening(opening.getParams()).valid) {
++      return false;
++    }
++
++    this.openingList.push(opening);
++    opening.setWall(this);
++    this.add(opening);
++
++    this.updateGeometry();
++
++    return true;
++  }
++
++  /**
++   * Detaches an opening so the wall becomes solid again.
++   *
++   * The opening itself is not disposed; the caller keeps ownership of it.
++   */
++  removeOpening(opening: Opening): boolean {
++    const index = this.openingList.indexOf(opening);
++
++    if (index === -1) {
++      return false;
++    }
++
++    this.openingList.splice(index, 1);
++    this.remove(opening);
++    opening.setWall(null);
++
++    this.updateGeometry();
++
++    return true;
++  }
++
++  /**
++   * Resizes / moves an existing opening, rejecting invalid results.
++   */
++  updateOpening(opening: Opening, params: OpeningParams): boolean {
++    if (!this.openingList.includes(opening)) {
++      return false;
++    }
++
++    if (!this.canPlaceOpening(params, opening).valid) {
++      return false;
++    }
++
++    opening.setParams(params);
++    this.updateGeometry();
++
++    return true;
++  }
++
++  /**
++   * Drops openings that no longer fit after the wall changed.
++   *
++   * Openings are checked in placement order, so the oldest ones win.
++   */
++  private pruneInvalidOpenings(): void {
++    if (this.openingList.length === 0) {
++      return;
++    }
++
++    const length = this.getLength();
++    const kept: Opening[] = [];
++    const removed: Opening[] = [];
++
++    for (const opening of this.openingList) {
++      const validation = validateOpeningPlacement(
++        opening.getParams(),
++        length,
++        this.height,
++        kept.map((other) => other.getFootprint()),
++      );
++
++      if (validation.valid) {
++        kept.push(opening);
++      } else {
++        removed.push(opening);
++      }
++    }
++
++    if (removed.length === 0) {
++      return;
++    }
++
++    this.openingList.length = 0;
++    this.openingList.push(...kept);
++
++    for (const opening of removed) {
++      this.remove(opening);
++      opening.setWall(null);
++    }
++
++    this.onOpeningsRemoved?.(removed);
++  }
++
++  // --------------------------------
++  // Geometry
++  // --------------------------------
++
+   updateGeometry(): void {
+     const orientation = this.getOrientation();
+-    const length = this.getLength();
+ 
+     // Prevent 0-dimension geometry errors
+-    const safeLength = Math.max(length, 0.001);
++    const safeLength = Math.max(this.getLength(), 0.001);
+     const safeHeight = Math.max(this.height, 0.01);
+     const safeWidth = Math.max(this.width, 0.01);
+ 
+-    let dimX: number;
+-    let dimZ: number;
++    this.pruneInvalidOpenings();
+ 
+-    if (orientation === 'x') {
+-      dimX = safeLength;
+-      dimZ = safeWidth;
+-    } else {
+-      dimX = safeWidth;
+-      dimZ = safeLength;
+-    }
++    const cutouts = this.openingList.map((opening) => opening.getFootprint());
+ 
+-    const newGeo = new THREE.BoxGeometry(dimX, safeHeight, dimZ);
++    const newGeo = createProfileGeometry(
++      safeLength,
++      safeHeight,
++      safeWidth,
++      cutouts,
++    );
+ 
+     if (this.geometry) {
+       this.geometry.dispose();
+     }
+     this.geometry = newGeo;
+ 
+-    // Calculate center position
++    // The profile runs along local X and starts at local y = 0, so the wall is
++    // centred horizontally and stands on the floor.
+     const midX = (this.startPoint.x + this.endPoint.x) / 2;
+-    const midY = safeHeight / 2;
+     const midZ = (this.startPoint.z + this.endPoint.z) / 2;
+ 
+-    this.position.set(midX, midY, midZ);
++    this.position.set(midX, 0, midZ);
++    this.rotation.set(0, orientation === 'x' ? 0 : -Math.PI / 2, 0);
++
++    // Openings depend on the wall length and thickness.
++    for (const opening of this.openingList) {
++      opening.build();
++    }
++
++    // Keep picking correct even between two renders.
++    this.updateMatrixWorld(true);
+ 
+     if (this.edgesMesh) {
+       if (this.edgesMesh.geometry) {
+@@ -170,7 +333,27 @@ export class WallMesh extends BaseMesh {
+     }
+   }
+ 
++  /**
++   * Converts a world space point (typically a raycast hit) into the distance
++   * along the wall, measured from its min end.
++   */
++  getDistanceAlongWall(worldPoint: THREE.Vector3): number {
++    this.updateWorldMatrix(true, false);
++
++    const local = this.worldToLocal(worldPoint.clone());
++
++    return local.x + this.getLength() / 2;
++  }
++
+   override dispose(): void {
++    for (const opening of this.openingList) {
++      this.remove(opening);
++      opening.setWall(null);
++      opening.dispose();
++    }
++    this.openingList.length = 0;
++    this.onOpeningsRemoved = undefined;
++
+     if (this.edgesMesh) {
+       this.edgesMesh.geometry.dispose();
+       if (Array.isArray(this.edgesMesh.material)) {
+diff --git a/src/objects/openings/DoorMesh.ts b/src/objects/openings/DoorMesh.ts
+new file mode 100644
+index 0000000..065e092
+--- /dev/null
++++ b/src/objects/openings/DoorMesh.ts
+@@ -0,0 +1,104 @@
++import * as THREE from 'three';
++
++import { Opening } from './Opening';
++import { createFrameGeometry } from '../../utils/profileGeometry';
++import type { OpeningParams, OpeningType } from '../../types/Opening';
++
++/** Width of the door jamb members. */
++const JAMB_WIDTH = 0.05;
++
++/** Thickness of the door leaf. */
++const LEAF_THICKNESS = 0.05;
++
++/** Gap between the leaf and the jamb so they do not z-fight. */
++const LEAF_CLEARANCE = 0.008;
++
++/** The jamb reaches slightly into the wall to avoid coplanar faces. */
++const FRAME_EMBED = 0.003;
++
++/** Standard handle height above floor level. */
++const HANDLE_HEIGHT = 1.02;
++
++/**
++ * A door: a hole down to floor level with a frame and a hinged leaf.
++ *
++ * The leaf is the mesh body itself, which means it is also the surface the
++ * user picks when selecting the door.
++ */
++export class DoorMesh extends Opening {
++  readonly type: OpeningType = 'door';
++
++  constructor(params: OpeningParams, isPreview = false) {
++    super(params, isPreview);
++
++    this.replaceMaterials(
++      new THREE.MeshStandardMaterial({
++        color: 0x9a6b43,
++        roughness: 0.65,
++        metalness: 0.05,
++      }),
++      new THREE.MeshStandardMaterial({ color: 0xc79a6b, roughness: 0.55 }),
++      new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.45 }),
++    );
++  }
++
++  private getLeafSize(wallThickness: number): {
++    width: number;
++    height: number;
++    depth: number;
++  } {
++    return {
++      width: Math.max(this.width - 2 * JAMB_WIDTH - LEAF_CLEARANCE, 0.02),
++      height: Math.max(this.height - JAMB_WIDTH - LEAF_CLEARANCE, 0.02),
++      depth: Math.max(Math.min(LEAF_THICKNESS, wallThickness * 0.6), 0.01),
++    };
++  }
++
++  protected createBodyGeometry(wallThickness: number): THREE.BufferGeometry {
++    const leaf = this.getLeafSize(wallThickness);
++
++    const geometry = new THREE.BoxGeometry(leaf.width, leaf.height, leaf.depth);
++
++    // The leaf stands on the floor, the opening origin is at its centre.
++    geometry.translate(0, -this.height / 2 + leaf.height / 2, 0);
++
++    return geometry;
++  }
++
++  protected createDecorations(wallThickness: number): THREE.Object3D[] {
++    const leaf = this.getLeafSize(wallThickness);
++
++    const jambGeometry = createFrameGeometry({
++      outerWidth: this.width + 2 * FRAME_EMBED,
++      outerHeight: this.height + FRAME_EMBED,
++      depth: Math.max(wallThickness - 2 * FRAME_EMBED, 0.01),
++      thickness: JAMB_WIDTH + FRAME_EMBED,
++      openBottom: true,
++    });
++
++    // createFrameGeometry centres on the outer height; realign to the opening.
++    jambGeometry.translate(0, FRAME_EMBED / 2, 0);
++
++    const jamb = new THREE.Mesh(
++      jambGeometry,
++      new THREE.MeshStandardMaterial({ color: 0xf3f4f6, roughness: 0.6 }),
++    );
++
++    const handle = new THREE.Mesh(
++      new THREE.SphereGeometry(0.035, 14, 10),
++      new THREE.MeshStandardMaterial({
++        color: 0xfbbf24,
++        metalness: 0.75,
++        roughness: 0.25,
++      }),
++    );
++
++    handle.position.set(
++      leaf.width / 2 - 0.08,
++      -this.height / 2 + Math.min(HANDLE_HEIGHT, this.height * 0.5),
++      leaf.depth / 2 + 0.025,
++    );
++
++    return [jamb, handle];
++  }
++}
+diff --git a/src/objects/openings/Opening.ts b/src/objects/openings/Opening.ts
+new file mode 100644
+index 0000000..c977030
+--- /dev/null
++++ b/src/objects/openings/Opening.ts
+@@ -0,0 +1,283 @@
++import * as THREE from 'three';
++
++import { BaseMesh } from '../BaseMesh';
++import { disposeObject3D } from '../../utils/dispose';
++import { getOpeningFootprint } from '../../utils/openingLayout';
++import type { RectCutout } from '../../utils/profileGeometry';
++import type { OpeningParams, OpeningType } from '../../types/Opening';
++import type { WallMesh } from '../WallMesh';
++
++const PREVIEW_VALID_COLOR = 0x22c55e;
++const PREVIEW_INVALID_COLOR = 0xef4444;
++
++/** Used while an opening is not attached to a wall yet. */
++const FALLBACK_WALL_THICKNESS = 0.3;
++
++/** Previews are drawn on top of the still solid wall so they stay visible. */
++const PREVIEW_RENDER_ORDER = 1000;
++
++/**
++ * Base class for everything that can be cut into a wall.
++ *
++ * An `Opening` is both the model (position + size inside its wall) and the
++ * visual representation that is placed inside the hole. Concrete subclasses
++ * only have to describe:
++ *
++ *  - the "body" geometry, which doubles as the pickable surface, and
++ *  - any decorative sub meshes (frames, mullions, handles, ...).
++ *
++ * The opening is added as a child of its `WallMesh`, so it automatically
++ * follows the wall's position and orientation for both X and Z walls.
++ */
++export abstract class Opening extends BaseMesh {
++  abstract readonly type: OpeningType;
++
++  readonly isPreview: boolean;
++
++  private params: OpeningParams;
++
++  private wallRef: WallMesh | null = null;
++
++  private readonly decorations: THREE.Object3D[] = [];
++
++  private previewMaterial: THREE.MeshStandardMaterial | null = null;
++
++  protected constructor(params: OpeningParams, isPreview: boolean) {
++    super();
++
++    this.isPreview = isPreview;
++    this.params = { ...params };
++
++    if (isPreview) {
++      this.previewMaterial = new THREE.MeshStandardMaterial({
++        color: PREVIEW_VALID_COLOR,
++        transparent: true,
++        opacity: 0.5,
++        depthTest: false,
++        depthWrite: false,
++        roughness: 0.35,
++      });
++
++      this.renderOrder = PREVIEW_RENDER_ORDER;
++    }
++  }
++
++  // --------------------------------
++  // Model
++  // --------------------------------
++
++  get wall(): WallMesh | null {
++    return this.wallRef;
++  }
++
++  get distanceAlongWall(): number {
++    return this.params.distanceAlongWall;
++  }
++
++  get width(): number {
++    return this.params.width;
++  }
++
++  get height(): number {
++    return this.params.height;
++  }
++
++  get sillHeight(): number {
++    return this.params.sillHeight;
++  }
++
++  getParams(): OpeningParams {
++    return { ...this.params };
++  }
++
++  getFootprint(): RectCutout {
++    return getOpeningFootprint(this.params);
++  }
++
++  /**
++   * Replaces the opening description.
++   *
++   * Callers are responsible for validating the new values against the wall
++   * (see {@link WallMesh.updateOpening}) and for rebuilding afterwards.
++   */
++  setParams(params: OpeningParams): void {
++    this.params = { ...params };
++  }
++
++  /**
++   * Slides the opening along its wall.
++   *
++   * Only the transform changes, so this is cheap enough to call on every
++   * pointer move while dragging a preview around.
++   */
++  setDistanceAlongWall(distanceAlongWall: number): void {
++    this.params.distanceAlongWall = distanceAlongWall;
++    this.updateTransform();
++  }
++
++  /**
++   * Wires the opening to its wall. Called by {@link WallMesh}.
++   */
++  setWall(wall: WallMesh | null): void {
++    this.wallRef = wall;
++  }
++
++  // --------------------------------
++  // Geometry
++  // --------------------------------
++
++  /**
++   * (Re)creates the body geometry, the decorations and the local transform.
++   *
++   * Called whenever the opening or its host wall changes, so a wall can be
++   * resized or re-thicknessed without losing its openings.
++   */
++  build(): void {
++    const wallThickness = this.wallRef?.width ?? FALLBACK_WALL_THICKNESS;
++
++    const body = this.createBodyGeometry(wallThickness);
++
++    this.geometry?.dispose();
++    this.geometry = body;
++
++    this.clearDecorations();
++
++    for (const decoration of this.createDecorations(wallThickness)) {
++      this.decorations.push(decoration);
++      this.add(decoration);
++    }
++
++    if (this.isPreview) {
++      this.applyPreviewMaterials();
++    }
++
++    this.updateTransform();
++  }
++
++  protected abstract createBodyGeometry(
++    wallThickness: number,
++  ): THREE.BufferGeometry;
++
++  protected abstract createDecorations(
++    wallThickness: number,
++  ): THREE.Object3D[];
++
++  /**
++   * Positions the opening inside its wall's local frame.
++   *
++   * The wall geometry is centred on X and starts at y = 0, so the opening
++   * centre is simply "distance from the min end minus half the wall length".
++   */
++  private updateTransform(): void {
++    const wallLength = this.wallRef?.getLength() ?? this.params.width;
++
++    this.position.set(
++      this.params.distanceAlongWall - wallLength / 2,
++      this.params.sillHeight + this.params.height / 2,
++      0,
++    );
++  }
++
++  private clearDecorations(): void {
++    const keep = this.previewMaterial
++      ? new Set<THREE.Material>([this.previewMaterial])
++      : undefined;
++
++    for (const decoration of this.decorations) {
++      this.remove(decoration);
++      disposeObject3D(decoration, keep);
++    }
++
++    this.decorations.length = 0;
++  }
++
++  // --------------------------------
++  // Materials
++  // --------------------------------
++
++  /**
++   * Lets subclasses install their own look while keeping ownership of the
++   * materials created by {@link BaseMesh}.
++   */
++  protected replaceMaterials(
++    defaultMaterial: THREE.Material,
++    hoverMaterial: THREE.Material,
++    selectMaterial: THREE.Material,
++  ): void {
++    this.defaultMaterial.dispose();
++    this.hoverMaterial.dispose();
++    this.selectMaterial.dispose();
++
++    this.defaultMaterial = defaultMaterial;
++    this.hoverMaterial = hoverMaterial;
++    this.selectMaterial = selectMaterial;
++
++    this.updateMaterialState();
++  }
++
++  protected override updateMaterialState(): void {
++    if (this.isPreview && this.previewMaterial) {
++      this.material = this.previewMaterial;
++      return;
++    }
++
++    super.updateMaterialState();
++  }
++
++  private applyPreviewMaterials(): void {
++    const material = this.previewMaterial;
++
++    if (!material) {
++      return;
++    }
++
++    this.material = material;
++
++    for (const decoration of this.decorations) {
++      decoration.traverse((child) => {
++        child.renderOrder = PREVIEW_RENDER_ORDER;
++
++        const mesh = child as Partial<THREE.Mesh>;
++
++        if (!mesh.material || mesh.material === material) {
++          return;
++        }
++
++        // The decoration's own material is not needed for a ghost preview.
++        const previous = Array.isArray(mesh.material)
++          ? mesh.material
++          : [mesh.material];
++
++        for (const item of previous) {
++          item.dispose();
++        }
++
++        mesh.material = material;
++      });
++    }
++  }
++
++  /**
++   * Colours a preview green or red depending on whether it can be placed.
++   */
++  setPreviewValid(valid: boolean): void {
++    this.previewMaterial?.color.setHex(
++      valid ? PREVIEW_VALID_COLOR : PREVIEW_INVALID_COLOR,
++    );
 +  }
 +
 +  override dispose(): void {
-+    if (this.edgesMesh) {
-+      this.edgesMesh.geometry.dispose();
-+      if (Array.isArray(this.edgesMesh.material)) {
-+        this.edgesMesh.material.forEach((m) => m.dispose());
-+      } else {
-+        this.edgesMesh.material.dispose();
-+      }
++    this.clearDecorations();
++
++    this.material = this.defaultMaterial;
++
++    if (this.previewMaterial) {
++      this.previewMaterial.dispose();
++      this.previewMaterial = null;
 +    }
++
++    this.wallRef = null;
++
 +    super.dispose();
 +  }
 +}
-diff --git a/src/ui/UIOverlay.css b/src/ui/UIOverlay.css
+diff --git a/src/objects/openings/OpeningFactory.ts b/src/objects/openings/OpeningFactory.ts
 new file mode 100644
-index 0000000..6950166
+index 0000000..65bd350
 --- /dev/null
-+++ b/src/ui/UIOverlay.css
-@@ -0,0 +1,154 @@
-+.ui-overlay-container {
-+  position: absolute;
-+  top: 16px;
-+  left: 16px;
-+  z-index: 100;
-+  pointer-events: none;
-+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-+  user-select: none;
++++ b/src/objects/openings/OpeningFactory.ts
+@@ -0,0 +1,42 @@
++import { DoorMesh } from './DoorMesh';
++import { WindowMesh } from './WindowMesh';
++import type { Opening } from './Opening';
++import {
++  OPENING_DEFAULTS,
++  type OpeningParams,
++  type OpeningType,
++} from '../../types/Opening';
++
++type OpeningConstructor = new (
++  params: OpeningParams,
++  isPreview?: boolean,
++) => Opening;
++
++/**
++ * Registry of the opening kinds the application knows about.
++ *
++ * Adding a new kind (a hatch, a pass-through, ...) only requires a new
++ * `Opening` subclass plus an entry here.
++ */
++const OPENING_CONSTRUCTORS: Readonly<Record<OpeningType, OpeningConstructor>> = {
++  door: DoorMesh,
++  window: WindowMesh,
++};
++
++export function createOpening(
++  type: OpeningType,
++  params: OpeningParams,
++  isPreview = false,
++): Opening {
++  return new OPENING_CONSTRUCTORS[type](params, isPreview);
 +}
 +
-+.ui-card {
-+  pointer-events: auto;
-+  background: rgba(18, 24, 38, 0.88);
-+  backdrop-filter: blur(12px);
-+  -webkit-backdrop-filter: blur(12px);
-+  border: 1px solid rgba(255, 255, 255, 0.12);
-+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
-+  border-radius: 12px;
-+  padding: 16px;
-+  width: 260px;
-+  color: #f3f4f6;
++/**
++ * Builds the parameters for a freshly placed opening of the given kind.
++ */
++export function createDefaultOpeningParams(
++  type: OpeningType,
++  distanceAlongWall: number,
++): OpeningParams {
++  return { ...OPENING_DEFAULTS[type], distanceAlongWall };
++}
+diff --git a/src/objects/openings/WindowMesh.ts b/src/objects/openings/WindowMesh.ts
+new file mode 100644
+index 0000000..08f76b2
+--- /dev/null
++++ b/src/objects/openings/WindowMesh.ts
+@@ -0,0 +1,96 @@
++import * as THREE from 'three';
++
++import { Opening } from './Opening';
++import { createFrameGeometry } from '../../utils/profileGeometry';
++import type { OpeningParams, OpeningType } from '../../types/Opening';
++
++/** Width of the window frame members. */
++const FRAME_WIDTH = 0.06;
++
++/** Thickness of the glazing. */
++const GLASS_THICKNESS = 0.02;
++
++/** The frame reaches slightly into the wall to avoid coplanar faces. */
++const FRAME_EMBED = 0.003;
++
++/** Width of the cross mullions. */
++const MULLION_WIDTH = 0.03;
++
++function createGlassMaterial(
++  color: number,
++  opacity: number,
++): THREE.MeshStandardMaterial {
++  return new THREE.MeshStandardMaterial({
++    color,
++    transparent: true,
++    opacity,
++    roughness: 0.08,
++    metalness: 0.0,
++    side: THREE.DoubleSide,
++  });
++}
++
++/**
++ * A window: a hole that floats above floor level, filled with a frame,
++ * a pair of mullions and a glazed pane.
++ *
++ * The pane is the mesh body, so the whole glazed area is pickable.
++ */
++export class WindowMesh extends Opening {
++  readonly type: OpeningType = 'window';
++
++  constructor(params: OpeningParams, isPreview = false) {
++    super(params, isPreview);
++
++    this.replaceMaterials(
++      createGlassMaterial(0x9ecbff, 0.3),
++      createGlassMaterial(0x60a5fa, 0.5),
++      createGlassMaterial(0xf59e0b, 0.55),
++    );
++  }
++
++  private getGlassSize(): { width: number; height: number } {
++    return {
++      width: Math.max(this.width - 2 * FRAME_WIDTH, 0.02),
++      height: Math.max(this.height - 2 * FRAME_WIDTH, 0.02),
++    };
++  }
++
++  protected createBodyGeometry(): THREE.BufferGeometry {
++    const glass = this.getGlassSize();
++
++    return new THREE.BoxGeometry(glass.width, glass.height, GLASS_THICKNESS);
++  }
++
++  protected createDecorations(wallThickness: number): THREE.Object3D[] {
++    const glass = this.getGlassSize();
++
++    const frameGeometry = createFrameGeometry({
++      outerWidth: this.width + 2 * FRAME_EMBED,
++      outerHeight: this.height + 2 * FRAME_EMBED,
++      depth: Math.max(wallThickness - 2 * FRAME_EMBED, 0.01),
++      thickness: FRAME_WIDTH + FRAME_EMBED,
++    });
++
++    const frameMaterial = new THREE.MeshStandardMaterial({
++      color: 0xf3f4f6,
++      roughness: 0.55,
++    });
++
++    const frame = new THREE.Mesh(frameGeometry, frameMaterial);
++
++    const mullionDepth = GLASS_THICKNESS + 0.02;
++
++    const vertical = new THREE.Mesh(
++      new THREE.BoxGeometry(MULLION_WIDTH, glass.height, mullionDepth),
++      frameMaterial,
++    );
++
++    const horizontal = new THREE.Mesh(
++      new THREE.BoxGeometry(glass.width, MULLION_WIDTH, mullionDepth),
++      frameMaterial,
++    );
++
++    return [frame, vertical, horizontal];
++  }
++}
+diff --git a/src/types/Opening.ts b/src/types/Opening.ts
+new file mode 100644
+index 0000000..435cb85
+--- /dev/null
++++ b/src/types/Opening.ts
+@@ -0,0 +1,50 @@
++/**
++ * Shared, renderer agnostic description of a wall opening.
++ *
++ * Openings are always described in the local frame of the wall they belong to:
++ *
++ *  - `distanceAlongWall` is measured from the wall's "min" end
++ *    (smallest X for X-oriented walls, smallest Z for Z-oriented walls)
++ *    to the horizontal centre of the opening.
++ *  - `sillHeight` is measured from floor level (y = 0).
++ *
++ * Keeping the description independent from Three.js makes the placement rules
++ * easy to unit test and reuse for other opening kinds later on.
++ */
++export type OpeningType = 'door' | 'window';
++
++export interface OpeningParams {
++  /** Distance from the wall's min end to the centre of the opening (m). */
++  distanceAlongWall: number;
++
++  /** Clear width of the opening (m). */
++  width: number;
++
++  /** Clear height of the opening (m). */
++  height: number;
++
++  /** Height of the opening's bottom edge above floor level (m). */
++  sillHeight: number;
++}
++
++export type OpeningSize = Omit<OpeningParams, 'distanceAlongWall'>;
++
++/**
++ * Default sizes used when a new opening is placed.
++ */
++export const OPENING_DEFAULTS: Readonly<Record<OpeningType, OpeningSize>> = {
++  door: { width: 0.9, height: 2.1, sillHeight: 0 },
++  window: { width: 1.2, height: 1.0, sillHeight: 1.0 },
++};
++
++export const OPENING_LABELS: Readonly<Record<OpeningType, string>> = {
++  door: 'Door',
++  window: 'Window',
++};
++
++/**
++ * A door always sits on the floor, so its sill height is not user editable.
++ */
++export function isGroundedOpeningType(type: OpeningType): boolean {
++  return type === 'door';
++}
+diff --git a/src/ui/UIOverlay.css b/src/ui/UIOverlay.css
+index 6950166..b330258 100644
+--- a/src/ui/UIOverlay.css
++++ b/src/ui/UIOverlay.css
+@@ -38,7 +38,8 @@
+ }
+ 
+ .ui-mode-toggle {
+-  display: flex;
++  display: grid;
++  grid-template-columns: 1fr 1fr;
+   background: rgba(0, 0, 0, 0.3);
+   border-radius: 8px;
+   padding: 3px;
+@@ -99,6 +100,53 @@
+   font-weight: 500;
+ }
+ 
++.ui-error-text {
++  color: #f87171;
++  font-weight: 500;
++  font-size: 12px;
++  line-height: 1.4;
++}
++
++.ui-list {
++  list-style: none;
++  margin: 0;
++  padding: 0;
 +  display: flex;
 +  flex-direction: column;
-+  gap: 12px;
-+}
-+
-+.ui-header {
-+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-+  padding-bottom: 8px;
-+}
-+
-+.ui-title {
-+  margin: 0;
-+  font-size: 15px;
-+  font-weight: 600;
-+  color: #ffffff;
-+  letter-spacing: 0.3px;
-+}
-+
-+.ui-mode-toggle {
-+  display: flex;
-+  background: rgba(0, 0, 0, 0.3);
-+  border-radius: 8px;
-+  padding: 3px;
 +  gap: 4px;
++  max-height: 140px;
++  overflow-y: auto;
 +}
 +
-+.ui-btn {
-+  flex: 1;
++.ui-list-item {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 8px;
++  font-size: 12px;
++  color: #d1d5db;
++  background: rgba(255, 255, 255, 0.05);
++  border-radius: 6px;
++  padding: 5px 8px;
++}
++
++.ui-icon-btn {
 +  background: transparent;
 +  border: none;
 +  color: #9ca3af;
-+  padding: 8px 10px;
-+  font-size: 13px;
-+  font-weight: 500;
-+  border-radius: 6px;
 +  cursor: pointer;
-+  transition: all 0.2s ease;
-+  display: flex;
-+  align-items: center;
-+  justify-content: center;
-+  gap: 6px;
++  font-size: 12px;
++  line-height: 1;
++  padding: 2px 4px;
++  border-radius: 4px;
++  transition: all 0.15s ease;
 +}
 +
-+.ui-btn:hover {
-+  color: #ffffff;
-+  background: rgba(255, 255, 255, 0.08);
-+}
-+
-+.ui-btn.active {
-+  background: #2563eb;
-+  color: #ffffff;
-+  box-shadow: 0 2px 6px rgba(37, 99, 235, 0.4);
-+}
-+
-+.ui-btn-danger {
-+  background: rgba(239, 68, 68, 0.15);
-+  color: #f87171;
-+  border: 1px solid rgba(239, 68, 68, 0.3);
-+  margin-top: 8px;
-+}
-+
-+.ui-btn-danger:hover {
++.ui-icon-btn:hover {
 +  background: rgba(239, 68, 68, 0.8);
 +  color: #ffffff;
 +}
 +
-+.ui-instruction {
-+  font-size: 12px;
-+  line-height: 1.4;
-+  color: #9ca3af;
-+  background: rgba(255, 255, 255, 0.04);
-+  padding: 8px 10px;
-+  border-radius: 6px;
-+}
-+
-+.ui-highlight-text {
-+  color: #60a5fa;
-+  font-weight: 500;
-+}
-+
-+.ui-inspector {
-+  display: flex;
-+  flex-direction: column;
-+  gap: 10px;
-+  border-top: 1px solid rgba(255, 255, 255, 0.1);
-+  padding-top: 10px;
-+}
-+
-+.ui-section-title {
-+  margin: 0;
-+  font-size: 13px;
-+  font-weight: 600;
-+  color: #f3f4f6;
-+}
-+
-+.ui-field {
-+  display: flex;
-+  flex-direction: column;
-+  gap: 4px;
-+
-+  label {
-+    font-size: 12px;
-+    color: #9ca3af;
-+  }
-+
-+  input {
-+    background: rgba(0, 0, 0, 0.4);
-+    border: 1px solid rgba(255, 255, 255, 0.15);
-+    border-radius: 6px;
-+    padding: 6px 10px;
-+    color: #ffffff;
-+    font-size: 13px;
-+    outline: none;
-+    transition: border-color 0.2s;
-+  }
-+
-+  input:focus {
-+    border-color: #2563eb;
-+  }
-+}
-+
-+.ui-field-readonly {
-+  display: flex;
-+  justify-content: space-between;
-+  align-items: center;
-+  font-size: 12px;
-+  color: #9ca3af;
-+
-+  strong {
-+    color: #e5e7eb;
-+    font-weight: 500;
-+  }
-+}
+ .ui-inspector {
+   display: flex;
+   flex-direction: column;
 diff --git a/src/ui/UIOverlay.tsx b/src/ui/UIOverlay.tsx
-new file mode 100644
-index 0000000..27aaa18
---- /dev/null
+index 27aaa18..ae618fb 100644
+--- a/src/ui/UIOverlay.tsx
 +++ b/src/ui/UIOverlay.tsx
-@@ -0,0 +1,142 @@
-+import React, { useEffect, useReducer } from 'react';
-+import type { WallToolComponent } from '../components/WallToolComponent';
-+import './UIOverlay.css';
+@@ -1,11 +1,232 @@
+ import React, { useEffect, useReducer } from 'react';
+-import type { WallToolComponent } from '../components/WallToolComponent';
++import type { ToolMode, WallToolComponent } from '../components/WallToolComponent';
++import type { WallMesh } from '../objects/WallMesh';
++import type { Opening } from '../objects/openings/Opening';
++import { OPENING_LABELS, isGroundedOpeningType } from '../types/Opening';
+ import './UIOverlay.css';
+ 
+ interface UIOverlayProps {
+   wallTool: WallToolComponent | null;
+ }
+ 
++const MODE_BUTTONS: ReadonlyArray<{ mode: ToolMode; label: string }> = [
++  { mode: 'select', label: '🔍 Select' },
++  { mode: 'add-wall', label: '🧱 Wall' },
++  { mode: 'add-door', label: '🚪 Door' },
++  { mode: 'add-window', label: '🪟 Window' },
++];
 +
-+interface UIOverlayProps {
-+  wallTool: WallToolComponent | null;
++const OPENING_ICONS: Readonly<Record<string, string>> = {
++  door: '🚪',
++  window: '🪟',
++};
++
++function parsePositive(value: string): number | null {
++  const parsed = parseFloat(value);
++  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 +}
 +
-+export const UIOverlay: React.FC<UIOverlayProps> = ({ wallTool }) => {
-+  const [, forceUpdate] = useReducer((x) => x + 1, 0);
++function parseNonNegative(value: string): number | null {
++  const parsed = parseFloat(value);
++  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
++}
 +
-+  useEffect(() => {
-+    if (!wallTool) return;
++interface WallInspectorProps {
++  wallTool: WallToolComponent;
++  wall: WallMesh;
++}
 +
-+    const unsubscribe = wallTool.subscribe(() => {
-+      forceUpdate();
-+    });
++const WallInspector: React.FC<WallInspectorProps> = ({ wallTool, wall }) => (
++  <div className="ui-inspector">
++    <h3 className="ui-section-title">Selected Wall Details</h3>
 +
-+    return () => {
-+      unsubscribe();
-+    };
-+  }, [wallTool]);
++    <div className="ui-field">
++      <label htmlFor="wall-height">Height (m):</label>
++      <input
++        id="wall-height"
++        type="number"
++        step="0.1"
++        min="0.1"
++        max="20"
++        value={wall.height}
++        onChange={(event) => {
++          const value = parsePositive(event.target.value);
++          if (value !== null) {
++            wallTool.setSelectedWallHeight(value);
++          }
++        }}
++      />
++    </div>
 +
-+  if (!wallTool) {
-+    return null;
-+  }
++    <div className="ui-field">
++      <label htmlFor="wall-width">Width / Thickness (m):</label>
++      <input
++        id="wall-width"
++        type="number"
++        step="0.05"
++        min="0.05"
++        max="5"
++        value={wall.width}
++        onChange={(event) => {
++          const value = parsePositive(event.target.value);
++          if (value !== null) {
++            wallTool.setSelectedWallWidth(value);
++          }
++        }}
++      />
++    </div>
 +
-+  const isAddWall = wallTool.mode === 'add-wall';
-+  const isSelect = wallTool.mode === 'select';
-+  const selectedWall = wallTool.selectedWall;
++    <div className="ui-field-readonly">
++      <span>Length:</span>
++      <strong>{wall.getLength().toFixed(2)} m</strong>
++    </div>
 +
-+  const handleHeightChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-+    const val = parseFloat(e.target.value);
-+    if (!isNaN(val) && val > 0) {
-+      wallTool.setSelectedWallHeight(val);
-+    }
-+  };
++    <div className="ui-field-readonly">
++      <span>Orientation:</span>
++      <strong>{wall.getOrientation().toUpperCase()}-axis</strong>
++    </div>
 +
-+  const handleWidthChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-+    const val = parseFloat(e.target.value);
-+    if (!isNaN(val) && val > 0) {
-+      wallTool.setSelectedWallWidth(val);
-+    }
-+  };
++    <div className="ui-field-readonly">
++      <span>Openings:</span>
++      <strong>{wall.openings.length}</strong>
++    </div>
 +
-+  return (
-+    <div className="ui-overlay-container">
-+      <div className="ui-card">
-+        <div className="ui-header">
-+          <h2 className="ui-title">Modeling Tools</h2>
-+        </div>
-+
-+        {/* Mode Selector Toggle */}
-+        <div className="ui-mode-toggle">
-+          <button
-+            type="button"
-+            className={`ui-btn ${isSelect ? 'active' : ''}`}
-+            onClick={() => wallTool.setMode('select')}
-+          >
-+            🔍 Select
-+          </button>
-+          <button
-+            type="button"
-+            className={`ui-btn ${isAddWall ? 'active' : ''}`}
-+            onClick={() => wallTool.setMode('add-wall')}
-+          >
-+            🧱 Add Wall
-+          </button>
-+        </div>
-+
-+        {/* Status Instruction */}
-+        <div className="ui-instruction">
-+          {isAddWall && wallTool.placementState === 'idle' && (
-+            <span>Click a grid cell to set wall start.</span>
-+          )}
-+          {isAddWall && wallTool.placementState === 'picking-end' && (
-+            <span className="ui-highlight-text">
-+              Click second cell to place wall (Esc to cancel).
++    {wall.openings.length > 0 && (
++      <ul className="ui-list">
++        {wall.openings.map((opening) => (
++          <li key={opening.meshId} className="ui-list-item">
++            <span>
++              {OPENING_ICONS[opening.type]} {OPENING_LABELS[opening.type]} @{' '}
++              {opening.distanceAlongWall.toFixed(2)} m
 +            </span>
-+          )}
-+          {isSelect && !selectedWall && (
-+            <span>Hover and click a wall to select and edit its properties.</span>
-+          )}
-+          {isSelect && selectedWall && (
-+            <span className="ui-highlight-text">Wall selected.</span>
-+          )}
-+        </div>
-+
-+        {/* Selected Wall Inspector */}
-+        {isSelect && selectedWall && (
-+          <div className="ui-inspector">
-+            <h3 className="ui-section-title">Selected Wall Details</h3>
-+
-+            <div className="ui-field">
-+              <label htmlFor="wall-height">Height (m):</label>
-+              <input
-+                id="wall-height"
-+                type="number"
-+                step="0.1"
-+                min="0.1"
-+                max="20"
-+                value={selectedWall.height}
-+                onChange={handleHeightChange}
-+              />
-+            </div>
-+
-+            <div className="ui-field">
-+              <label htmlFor="wall-width">Width / Thickness (m):</label>
-+              <input
-+                id="wall-width"
-+                type="number"
-+                step="0.05"
-+                min="0.05"
-+                max="5"
-+                value={selectedWall.width}
-+                onChange={handleWidthChange}
-+              />
-+            </div>
-+
-+            <div className="ui-field-readonly">
-+              <span>Length:</span>
-+              <strong>{selectedWall.getLength().toFixed(2)} m</strong>
-+            </div>
-+
-+            <div className="ui-field-readonly">
-+              <span>Orientation:</span>
-+              <strong>{selectedWall.getOrientation().toUpperCase()}-axis</strong>
-+            </div>
-+
 +            <button
 +              type="button"
-+              className="ui-btn ui-btn-danger"
-+              onClick={() => wallTool.deleteSelectedWall()}
++              className="ui-icon-btn"
++              title="Remove this opening"
++              onClick={() => wallTool.deleteOpening(opening)}
 +            >
-+              🗑️ Delete Wall
++              ✕
 +            </button>
-+          </div>
-+        )}
++          </li>
++        ))}
++      </ul>
++    )}
++
++    <button
++      type="button"
++      className="ui-btn ui-btn-danger"
++      onClick={() => wallTool.deleteSelectedWall()}
++    >
++      🗑️ Delete Wall
++    </button>
++  </div>
++);
++
++interface OpeningInspectorProps {
++  wallTool: WallToolComponent;
++  opening: Opening;
++}
++
++const OpeningInspector: React.FC<OpeningInspectorProps> = ({
++  wallTool,
++  opening,
++}) => {
++  const label = OPENING_LABELS[opening.type];
++  const wallLength = opening.wall?.getLength() ?? 0;
++
++  return (
++    <div className="ui-inspector">
++      <h3 className="ui-section-title">Selected {label} Details</h3>
++
++      <div className="ui-field">
++        <label htmlFor="opening-width">Width (m):</label>
++        <input
++          id="opening-width"
++          type="number"
++          step="0.05"
++          min="0.1"
++          max="10"
++          value={opening.width}
++          onChange={(event) => {
++            const value = parsePositive(event.target.value);
++            if (value !== null) {
++              wallTool.setSelectedOpeningWidth(value);
++            }
++          }}
++        />
 +      </div>
++
++      <div className="ui-field">
++        <label htmlFor="opening-height">Height (m):</label>
++        <input
++          id="opening-height"
++          type="number"
++          step="0.05"
++          min="0.1"
++          max="10"
++          value={opening.height}
++          onChange={(event) => {
++            const value = parsePositive(event.target.value);
++            if (value !== null) {
++              wallTool.setSelectedOpeningHeight(value);
++            }
++          }}
++        />
++      </div>
++
++      {!isGroundedOpeningType(opening.type) && (
++        <div className="ui-field">
++          <label htmlFor="opening-sill">Sill Height (m):</label>
++          <input
++            id="opening-sill"
++            type="number"
++            step="0.05"
++            min="0"
++            max="10"
++            value={opening.sillHeight}
++            onChange={(event) => {
++              const value = parseNonNegative(event.target.value);
++              if (value !== null) {
++                wallTool.setSelectedOpeningSillHeight(value);
++              }
++            }}
++          />
++        </div>
++      )}
++
++      <div className="ui-field">
++        <label htmlFor="opening-distance">Position Along Wall (m):</label>
++        <input
++          id="opening-distance"
++          type="number"
++          step="0.05"
++          min="0"
++          max={wallLength}
++          value={opening.distanceAlongWall}
++          onChange={(event) => {
++            const value = parseNonNegative(event.target.value);
++            if (value !== null) {
++              wallTool.setSelectedOpeningDistance(value);
++            }
++          }}
++        />
++      </div>
++
++      {wallTool.openingEditError && (
++        <div className="ui-error-text">{wallTool.openingEditError}</div>
++      )}
++
++      <button
++        type="button"
++        className="ui-btn ui-btn-danger"
++        onClick={() => wallTool.deleteSelectedOpening()}
++      >
++        🗑️ Delete {label}
++      </button>
 +    </div>
 +  );
 +};
-diff --git a/src/utils/junctions.ts b/src/utils/junctions.ts
-new file mode 100644
-index 0000000..ca19db3
---- /dev/null
-+++ b/src/utils/junctions.ts
-@@ -0,0 +1,208 @@
-+import * as THREE from 'three';
-+import type { WallMesh } from '../objects/WallMesh';
 +
-+export interface JunctionResult {
-+  start: THREE.Vector3;
-+  end: THREE.Vector3;
-+  orientation: 'x' | 'z';
+ export const UIOverlay: React.FC<UIOverlayProps> = ({ wallTool }) => {
+   const [, forceUpdate] = useReducer((x) => x + 1, 0);
+ 
+@@ -25,23 +246,16 @@ export const UIOverlay: React.FC<UIOverlayProps> = ({ wallTool }) => {
+     return null;
+   }
+ 
+-  const isAddWall = wallTool.mode === 'add-wall';
+-  const isSelect = wallTool.mode === 'select';
+-  const selectedWall = wallTool.selectedWall;
+-
+-  const handleHeightChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+-    const val = parseFloat(e.target.value);
+-    if (!isNaN(val) && val > 0) {
+-      wallTool.setSelectedWallHeight(val);
+-    }
+-  };
++  const mode = wallTool.mode;
++  const isAddWall = mode === 'add-wall';
++  const isSelect = mode === 'select';
++  const isAddDoor = mode === 'add-door';
++  const isAddWindow = mode === 'add-window';
++  const isOpeningMode = isAddDoor || isAddWindow;
++  const openingLabel = isAddDoor ? 'door' : 'window';
+ 
+-  const handleWidthChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+-    const val = parseFloat(e.target.value);
+-    if (!isNaN(val) && val > 0) {
+-      wallTool.setSelectedWallWidth(val);
+-    }
+-  };
++  const selectedWall = wallTool.selectedWall;
++  const selectedOpening = wallTool.selectedOpening;
+ 
+   return (
+     <div className="ui-overlay-container">
+@@ -52,20 +266,16 @@ export const UIOverlay: React.FC<UIOverlayProps> = ({ wallTool }) => {
+ 
+         {/* Mode Selector Toggle */}
+         <div className="ui-mode-toggle">
+-          <button
+-            type="button"
+-            className={`ui-btn ${isSelect ? 'active' : ''}`}
+-            onClick={() => wallTool.setMode('select')}
+-          >
+-            🔍 Select
+-          </button>
+-          <button
+-            type="button"
+-            className={`ui-btn ${isAddWall ? 'active' : ''}`}
+-            onClick={() => wallTool.setMode('add-wall')}
+-          >
+-            🧱 Add Wall
+-          </button>
++          {MODE_BUTTONS.map((button) => (
++            <button
++              key={button.mode}
++              type="button"
++              className={`ui-btn ${mode === button.mode ? 'active' : ''}`}
++              onClick={() => wallTool.setMode(button.mode)}
++            >
++              {button.label}
++            </button>
++          ))}
+         </div>
+ 
+         {/* Status Instruction */}
+@@ -78,63 +288,40 @@ export const UIOverlay: React.FC<UIOverlayProps> = ({ wallTool }) => {
+               Click second cell to place wall (Esc to cancel).
+             </span>
+           )}
+-          {isSelect && !selectedWall && (
+-            <span>Hover and click a wall to select and edit its properties.</span>
++          {isOpeningMode && !wallTool.openingPreviewMessage && (
++            <span
++              className={wallTool.openingPreviewValid ? 'ui-highlight-text' : undefined}
++            >
++              {wallTool.openingPreviewValid
++                ? `Click to cut the ${openingLabel} into this wall.`
++                : `Hover a wall to preview a ${openingLabel}.`}
++            </span>
++          )}
++          {isOpeningMode && wallTool.openingPreviewMessage && (
++            <span className="ui-error-text">
++              {wallTool.openingPreviewMessage}
++            </span>
++          )}
++          {isSelect && !selectedWall && !selectedOpening && (
++            <span>
++              Hover and click a wall, door or window to select and edit it.
++            </span>
+           )}
+-          {isSelect && selectedWall && (
+-            <span className="ui-highlight-text">Wall selected.</span>
++          {isSelect && selectedWall && <span className="ui-highlight-text">Wall selected.</span>}
++          {isSelect && selectedOpening && (
++            <span className="ui-highlight-text">
++              {OPENING_LABELS[selectedOpening.type]} selected.
++            </span>
+           )}
+         </div>
+ 
+-        {/* Selected Wall Inspector */}
++        {/* Inspectors */}
+         {isSelect && selectedWall && (
+-          <div className="ui-inspector">
+-            <h3 className="ui-section-title">Selected Wall Details</h3>
+-
+-            <div className="ui-field">
+-              <label htmlFor="wall-height">Height (m):</label>
+-              <input
+-                id="wall-height"
+-                type="number"
+-                step="0.1"
+-                min="0.1"
+-                max="20"
+-                value={selectedWall.height}
+-                onChange={handleHeightChange}
+-              />
+-            </div>
+-
+-            <div className="ui-field">
+-              <label htmlFor="wall-width">Width / Thickness (m):</label>
+-              <input
+-                id="wall-width"
+-                type="number"
+-                step="0.05"
+-                min="0.05"
+-                max="5"
+-                value={selectedWall.width}
+-                onChange={handleWidthChange}
+-              />
+-            </div>
+-
+-            <div className="ui-field-readonly">
+-              <span>Length:</span>
+-              <strong>{selectedWall.getLength().toFixed(2)} m</strong>
+-            </div>
+-
+-            <div className="ui-field-readonly">
+-              <span>Orientation:</span>
+-              <strong>{selectedWall.getOrientation().toUpperCase()}-axis</strong>
+-            </div>
++          <WallInspector wallTool={wallTool} wall={selectedWall} />
++        )}
+ 
+-            <button
+-              type="button"
+-              className="ui-btn ui-btn-danger"
+-              onClick={() => wallTool.deleteSelectedWall()}
+-            >
+-              🗑️ Delete Wall
+-            </button>
+-          </div>
++        {isSelect && selectedOpening && (
++          <OpeningInspector wallTool={wallTool} opening={selectedOpening} />
+         )}
+       </div>
+     </div>
+diff --git a/src/utils/dispose.ts b/src/utils/dispose.ts
+new file mode 100644
+index 0000000..813c300
+--- /dev/null
++++ b/src/utils/dispose.ts
+@@ -0,0 +1,37 @@
++import * as THREE from 'three';
++
++function disposeMaterial(
++  material: THREE.Material | THREE.Material[] | null | undefined,
++  keep?: ReadonlySet<THREE.Material>,
++): void {
++  if (!material) {
++    return;
++  }
++
++  const materials = Array.isArray(material) ? material : [material];
++
++  for (const item of materials) {
++    if (!keep?.has(item)) {
++      item.dispose();
++    }
++  }
 +}
 +
-+export function calculateWallJunctions(
-+  rawStart: THREE.Vector3,
-+  rawEnd: THREE.Vector3,
-+  _newWallWidth: number,
-+  existingWalls: Iterable<WallMesh>,
-+): JunctionResult {
-+  const dx = Math.abs(rawEnd.x - rawStart.x);
-+  const dz = Math.abs(rawEnd.z - rawStart.z);
-+  const orientation: 'x' | 'z' = dx >= dz ? 'x' : 'z';
++/**
++ * Releases every GPU resource owned by an object and its descendants.
++ *
++ * Materials listed in `keep` are shared with something else (for example a
++ * ghost material owned by a preview) and are skipped.
++ */
++export function disposeObject3D(
++  object: THREE.Object3D,
++  keep?: ReadonlySet<THREE.Material>,
++): void {
++  object.traverse((child) => {
++    const renderable = child as Partial<THREE.Mesh>;
 +
-+  const EPSILON = 0.05; // Distance threshold for clicking on/near wall
++    renderable.geometry?.dispose();
 +
-+  if (orientation === 'x') {
-+    const wallZ = rawStart.z;
-+    let startX = rawStart.x;
-+    const endX = rawEnd.x;
-+    const dirX = Math.sign(endX - startX);
++    disposeMaterial(renderable.material, keep);
++  });
++}
+diff --git a/src/utils/junctions.ts b/src/utils/junctions.ts
+index ae55ac3..ed313f1 100644
+--- a/src/utils/junctions.ts
++++ b/src/utils/junctions.ts
+@@ -185,7 +185,7 @@ function snapZWall(
+   walls: WallMesh[],
+ ): JunctionResult {
+   let wallX = rawStart.x;
+-  let startX = rawStart.x;
++  const startX = rawStart.x;
+   let endX = rawEnd.x;
+   let startZ = rawStart.z;
+   let endZ = rawEnd.z;
+diff --git a/src/utils/openingLayout.ts b/src/utils/openingLayout.ts
+new file mode 100644
+index 0000000..46f6977
+--- /dev/null
++++ b/src/utils/openingLayout.ts
+@@ -0,0 +1,101 @@
++import type { OpeningParams } from '../types/Opening';
++import type { RectCutout } from './profileGeometry';
 +
-+    if (dirX === 0) {
-+      return {
-+        start: new THREE.Vector3(startX, 0, wallZ),
-+        end: new THREE.Vector3(endX, 0, wallZ),
-+        orientation,
-+      };
-+    }
++/**
++ * Minimum amount of solid wall that must remain between an opening and the
++ * wall edges (or another opening).
++ *
++ * Besides being sensible from a modelling point of view, this also guarantees
++ * the extruded wall profile never degenerates into a zero-width sliver or a
++ * hole that touches the outline, which triangulation cannot handle.
++ */
++export const MIN_SOLID_MARGIN = 0.01;
 +
-+    // 1. Adjust startX if clicking near existing wall face
-+    for (const wall of existingWalls) {
-+      if (wall.isPreview) continue;
-+      const wallOrient = wall.getOrientation();
++export type OpeningValidation =
++  | { valid: true }
++  | { valid: false; reason: string };
 +
-+      if (wallOrient === 'z') {
-+        const wallX = wall.startPoint.x;
-+        const halfW = wall.width / 2;
-+        const leftFace = wallX - halfW;
-+        const rightFace = wallX + halfW;
-+        const minZ = Math.min(wall.startPoint.z, wall.endPoint.z) - halfW;
-+        const maxZ = Math.max(wall.startPoint.z, wall.endPoint.z) + halfW;
++const VALID: OpeningValidation = { valid: true };
 +
-+        if (wallZ >= minZ - EPSILON && wallZ <= maxZ + EPSILON) {
-+          if (dirX > 0 && startX >= leftFace - EPSILON && startX <= rightFace + EPSILON) {
-+            startX = rightFace;
-+          } else if (dirX < 0 && startX >= leftFace - EPSILON && startX <= rightFace + EPSILON) {
-+            startX = leftFace;
-+          }
-+        }
-+      }
-+    }
++function invalid(reason: string): OpeningValidation {
++  return { valid: false, reason };
++}
 +
-+    // 2. Trim endX if approaching existing walls
-+    let closestEndX = endX;
++/**
++ * Converts an opening description into its 2D footprint on the wall profile.
++ */
++export function getOpeningFootprint(params: OpeningParams): RectCutout {
++  return {
++    start: params.distanceAlongWall - params.width / 2,
++    end: params.distanceAlongWall + params.width / 2,
++    bottom: params.sillHeight,
++    top: params.sillHeight + params.height,
++  };
++}
 +
-+    for (const wall of existingWalls) {
-+      if (wall.isPreview) continue;
-+      const wallOrient = wall.getOrientation();
++/**
++ * Two footprints clash when they overlap both horizontally and vertically.
++ *
++ * This allows a window to sit above a door, but rejects anything that would
++ * merge two openings into one.
++ */
++export function footprintsOverlap(
++  a: RectCutout,
++  b: RectCutout,
++  margin = MIN_SOLID_MARGIN,
++): boolean {
++  const horizontal = a.start < b.end + margin && b.start < a.end + margin;
++  const vertical = a.bottom < b.top + margin && b.bottom < a.top + margin;
 +
-+      if (wallOrient === 'z') {
-+        const wallX = wall.startPoint.x;
-+        const halfW = wall.width / 2;
-+        const leftFace = wallX - halfW;
-+        const rightFace = wallX + halfW;
-+        const minZ = Math.min(wall.startPoint.z, wall.endPoint.z) - halfW;
-+        const maxZ = Math.max(wall.startPoint.z, wall.endPoint.z) + halfW;
++  return horizontal && vertical;
++}
 +
-+        if (wallZ >= minZ - EPSILON && wallZ <= maxZ + EPSILON) {
-+          if (dirX > 0 && startX < leftFace) {
-+            if (endX >= leftFace) {
-+              if (leftFace < closestEndX) {
-+                closestEndX = leftFace;
-+              }
-+            }
-+          } else if (dirX < 0 && startX > rightFace) {
-+            if (endX <= rightFace) {
-+              if (rightFace > closestEndX) {
-+                closestEndX = rightFace;
-+              }
-+            }
-+          }
-+        }
-+      } else {
-+        // Collinear X wall
-+        const wZ = wall.startPoint.z;
-+        if (Math.abs(wZ - wallZ) < EPSILON) {
-+          const minX = Math.min(wall.startPoint.x, wall.endPoint.x);
-+          const maxX = Math.max(wall.startPoint.x, wall.endPoint.x);
-+
-+          if (dirX > 0 && startX < minX && endX >= minX) {
-+            if (minX < closestEndX) {
-+              closestEndX = minX;
-+            }
-+          } else if (dirX < 0 && startX > maxX && endX <= maxX) {
-+            if (maxX > closestEndX) {
-+              closestEndX = maxX;
-+            }
-+          }
-+        }
-+      }
-+    }
-+
-+    return {
-+      start: new THREE.Vector3(startX, 0, wallZ),
-+      end: new THREE.Vector3(closestEndX, 0, wallZ),
-+      orientation,
-+    };
-+  } else {
-+    // Z-aligned wall
-+    const wallX = rawStart.x;
-+    let startZ = rawStart.z;
-+    const endZ = rawEnd.z;
-+    const dirZ = Math.sign(endZ - startZ);
-+
-+    if (dirZ === 0) {
-+      return {
-+        start: new THREE.Vector3(wallX, 0, startZ),
-+        end: new THREE.Vector3(wallX, 0, endZ),
-+        orientation,
-+      };
-+    }
-+
-+    // 1. Adjust startZ if clicking near existing wall face
-+    for (const wall of existingWalls) {
-+      if (wall.isPreview) continue;
-+      const wallOrient = wall.getOrientation();
-+
-+      if (wallOrient === 'x') {
-+        const wallZ = wall.startPoint.z;
-+        const halfW = wall.width / 2;
-+        const bottomFace = wallZ - halfW;
-+        const topFace = wallZ + halfW;
-+        const minX = Math.min(wall.startPoint.x, wall.endPoint.x) - halfW;
-+        const maxX = Math.max(wall.startPoint.x, wall.endPoint.x) + halfW;
-+
-+        if (wallX >= minX - EPSILON && wallX <= maxX + EPSILON) {
-+          if (dirZ > 0 && startZ >= bottomFace - EPSILON && startZ <= topFace + EPSILON) {
-+            startZ = topFace;
-+          } else if (dirZ < 0 && startZ >= bottomFace - EPSILON && startZ <= topFace + EPSILON) {
-+            startZ = bottomFace;
-+          }
-+        }
-+      }
-+    }
-+
-+    // 2. Trim endZ if approaching existing walls
-+    let closestEndZ = endZ;
-+
-+    for (const wall of existingWalls) {
-+      if (wall.isPreview) continue;
-+      const wallOrient = wall.getOrientation();
-+
-+      if (wallOrient === 'x') {
-+        const wallZ = wall.startPoint.z;
-+        const halfW = wall.width / 2;
-+        const bottomFace = wallZ - halfW;
-+        const topFace = wallZ + halfW;
-+        const minX = Math.min(wall.startPoint.x, wall.endPoint.x) - halfW;
-+        const maxX = Math.max(wall.startPoint.x, wall.endPoint.x) + halfW;
-+
-+        if (wallX >= minX - EPSILON && wallX <= maxX + EPSILON) {
-+          if (dirZ > 0 && startZ < bottomFace) {
-+            if (endZ >= bottomFace) {
-+              if (bottomFace < closestEndZ) {
-+                closestEndZ = bottomFace;
-+              }
-+            }
-+          } else if (dirZ < 0 && startZ > topFace) {
-+            if (endZ <= topFace) {
-+              if (topFace > closestEndZ) {
-+                closestEndZ = topFace;
-+              }
-+            }
-+          }
-+        }
-+      } else {
-+        // Collinear Z wall
-+        const wX = wall.startPoint.x;
-+        if (Math.abs(wX - wallX) < EPSILON) {
-+          const minZ = Math.min(wall.startPoint.z, wall.endPoint.z);
-+          const maxZ = Math.max(wall.startPoint.z, wall.endPoint.z);
-+
-+          if (dirZ > 0 && startZ < minZ && endZ >= minZ) {
-+            if (minZ < closestEndZ) {
-+              closestEndZ = minZ;
-+            }
-+          } else if (dirZ < 0 && startZ > maxZ && endZ <= maxZ) {
-+            if (maxZ > closestEndZ) {
-+              closestEndZ = maxZ;
-+            }
-+          }
-+        }
-+      }
-+    }
-+
-+    return {
-+      start: new THREE.Vector3(wallX, 0, startZ),
-+      end: new THREE.Vector3(wallX, 0, closestEndZ),
-+      orientation,
-+    };
++/**
++ * Validates a candidate opening against the wall it should be cut into.
++ *
++ * `existing` holds the footprints of the openings already placed on that wall
++ * (excluding the one being edited, if any).
++ */
++export function validateOpeningPlacement(
++  params: OpeningParams,
++  wallLength: number,
++  wallHeight: number,
++  existing: readonly RectCutout[] = [],
++): OpeningValidation {
++  if (!Number.isFinite(params.width) || params.width <= 0) {
++    return invalid('Opening width must be greater than zero.');
 +  }
++
++  if (!Number.isFinite(params.height) || params.height <= 0) {
++    return invalid('Opening height must be greater than zero.');
++  }
++
++  if (!Number.isFinite(params.sillHeight) || params.sillHeight < 0) {
++    return invalid('Opening cannot start below floor level.');
++  }
++
++  if (!Number.isFinite(params.distanceAlongWall)) {
++    return invalid('Opening position is not a valid number.');
++  }
++
++  const footprint = getOpeningFootprint(params);
++
++  if (
++    footprint.start < MIN_SOLID_MARGIN ||
++    footprint.end > wallLength - MIN_SOLID_MARGIN
++  ) {
++    return invalid('Opening does not fit between the wall ends.');
++  }
++
++  if (footprint.top > wallHeight - MIN_SOLID_MARGIN) {
++    return invalid('Opening is too tall for this wall.');
++  }
++
++  for (const other of existing) {
++    if (footprintsOverlap(footprint, other)) {
++      return invalid('Opening overlaps another opening.');
++    }
++  }
++
++  return VALID;
++}
+diff --git a/src/utils/profileGeometry.ts b/src/utils/profileGeometry.ts
+new file mode 100644
+index 0000000..f90d47c
+--- /dev/null
++++ b/src/utils/profileGeometry.ts
+@@ -0,0 +1,137 @@
++import * as THREE from 'three';
++
++/**
++ * A rectangular cut-out described in the 2D profile space of a wall panel.
++ *
++ * `start`/`end` run along the panel width (0 .. width) and `bottom`/`top`
++ * run along the panel height (0 .. height).
++ */
++export interface RectCutout {
++  start: number;
++  end: number;
++  bottom: number;
++  top: number;
++}
++
++/** A cut-out whose bottom is at (or below) floor level is treated as a notch. */
++const GROUND_EPSILON = 1e-4;
++
++/**
++ * Builds the 2D cross section of a panel (a wall, a door frame, ...) that has
++ * rectangular cut-outs.
++ *
++ * Cut-outs that sit on the floor (doors) cannot be modelled as holes because a
++ * hole must be fully enclosed by the outline. They are instead traced into the
++ * bottom edge of the outline as notches. Cut-outs that float above the floor
++ * (windows) become real holes.
++ *
++ * The resulting shape is centred horizontally (x from -width/2 to +width/2) and
++ * starts at y = 0 so that y maps directly to "height above floor".
++ */
++export function createProfileShape(
++  width: number,
++  height: number,
++  cutouts: readonly RectCutout[] = [],
++): THREE.Shape {
++  const halfWidth = width / 2;
++
++  const notches = cutouts
++    .filter((cutout) => cutout.bottom <= GROUND_EPSILON)
++    .sort((a, b) => a.start - b.start);
++
++  const holes = cutouts.filter((cutout) => cutout.bottom > GROUND_EPSILON);
++
++  const shape = new THREE.Shape();
++
++  // Bottom edge, stepping up and over every floor level cut-out.
++  shape.moveTo(-halfWidth, 0);
++
++  for (const notch of notches) {
++    shape.lineTo(notch.start - halfWidth, 0);
++    shape.lineTo(notch.start - halfWidth, notch.top);
++    shape.lineTo(notch.end - halfWidth, notch.top);
++    shape.lineTo(notch.end - halfWidth, 0);
++  }
++
++  shape.lineTo(halfWidth, 0);
++  shape.lineTo(halfWidth, height);
++  shape.lineTo(-halfWidth, height);
++  shape.closePath();
++
++  // Holes are wound clockwise, opposite to the counter-clockwise outline.
++  for (const cutout of holes) {
++    const hole = new THREE.Path();
++    hole.moveTo(cutout.start - halfWidth, cutout.bottom);
++    hole.lineTo(cutout.start - halfWidth, cutout.top);
++    hole.lineTo(cutout.end - halfWidth, cutout.top);
++    hole.lineTo(cutout.end - halfWidth, cutout.bottom);
++    hole.closePath();
++    shape.holes.push(hole);
++  }
++
++  return shape;
++}
++
++/**
++ * Extrudes {@link createProfileShape} through the full panel depth.
++ *
++ * The geometry is centred on the depth axis, so the mesh can simply be placed
++ * at the wall's centre line. Because the profile is extruded through the whole
++ * depth, every cut-out is a real hole through the panel, including the reveal
++ * faces around it.
++ */
++export function createProfileGeometry(
++  width: number,
++  height: number,
++  depth: number,
++  cutouts: readonly RectCutout[] = [],
++): THREE.BufferGeometry {
++  const shape = createProfileShape(width, height, cutouts);
++
++  const geometry = new THREE.ExtrudeGeometry(shape, {
++    depth,
++    bevelEnabled: false,
++    steps: 1,
++  });
++
++  geometry.translate(0, 0, -depth / 2);
++  geometry.computeBoundingBox();
++  geometry.computeBoundingSphere();
++
++  return geometry;
++}
++
++export interface FrameOptions {
++  outerWidth: number;
++  outerHeight: number;
++  depth: number;
++  /** Width of the frame members. */
++  thickness: number;
++  /** Omit the bottom member (used for door jambs). */
++  openBottom?: boolean;
++}
++
++/**
++ * Builds a rectangular frame ("picture frame") geometry.
++ *
++ * The returned geometry is centred on all three axes so it can be dropped
++ * straight into the middle of an opening.
++ */
++export function createFrameGeometry(options: FrameOptions): THREE.BufferGeometry {
++  const { outerWidth, outerHeight, depth, thickness, openBottom = false } = options;
++
++  const maxThickness = Math.min(outerWidth, outerHeight) / 2 - 1e-3;
++  const safeThickness = Math.max(Math.min(thickness, maxThickness), 1e-3);
++
++  const cutout: RectCutout = {
++    start: safeThickness,
++    end: outerWidth - safeThickness,
++    bottom: openBottom ? 0 : safeThickness,
++    top: outerHeight - safeThickness,
++  };
++
++  const geometry = createProfileGeometry(outerWidth, outerHeight, depth, [cutout]);
++  geometry.translate(0, -outerHeight / 2, 0);
++
++  return geometry;
 +}

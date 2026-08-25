@@ -1,5 +1,13 @@
 import * as THREE from 'three';
+
 import { BaseMesh } from './BaseMesh';
+import type { Opening } from './openings/Opening';
+import { createProfileGeometry } from '../utils/profileGeometry';
+import {
+  validateOpeningPlacement,
+  type OpeningValidation,
+} from '../utils/openingLayout';
+import type { OpeningParams } from '../types/Opening';
 
 export interface WallOptions {
   startPoint: THREE.Vector3;
@@ -11,6 +19,15 @@ export interface WallOptions {
 
 export type WallOrientation = 'x' | 'z';
 
+/**
+ * Notified when openings had to be dropped because the wall no longer fits
+ * them (for example after the height was reduced).
+ *
+ * The wall detaches them from the scene graph but leaves ownership of the
+ * disposal and of any world registration to the caller that placed them.
+ */
+export type OpeningsRemovedHandler = (openings: Opening[]) => void;
+
 export class WallMesh extends BaseMesh {
   startPoint: THREE.Vector3;
   endPoint: THREE.Vector3;
@@ -18,7 +35,12 @@ export class WallMesh extends BaseMesh {
   width: number;
   readonly isPreview: boolean;
 
+  onOpeningsRemoved?: OpeningsRemovedHandler;
+
   private edgesMesh?: THREE.LineSegments;
+
+  /** Openings that belong to this wall, in placement order. */
+  private readonly openingList: Opening[] = [];
 
   constructor(options: WallOptions) {
     const isPreview = options.isPreview ?? false;
@@ -106,39 +128,180 @@ export class WallMesh extends BaseMesh {
     this.updateGeometry();
   }
 
+  // --------------------------------
+  // Openings
+  // --------------------------------
+
+  /**
+   * The doors and windows that currently belong to this wall.
+   */
+  get openings(): readonly Opening[] {
+    return this.openingList;
+  }
+
+  /**
+   * Checks whether an opening description fits this wall.
+   *
+   * `ignore` lets an existing opening be re-validated against its siblings
+   * without clashing with its own current footprint.
+   */
+  canPlaceOpening(params: OpeningParams, ignore?: Opening): OpeningValidation {
+    const others = this.openingList
+      .filter((opening) => opening !== ignore)
+      .map((opening) => opening.getFootprint());
+
+    return validateOpeningPlacement(params, this.getLength(), this.height, others);
+  }
+
+  /**
+   * Cuts an opening into this wall.
+   *
+   * Returns false and leaves the wall untouched when the placement is invalid.
+   */
+  addOpening(opening: Opening): boolean {
+    if (this.isPreview || this.openingList.includes(opening)) {
+      return false;
+    }
+
+    if (!this.canPlaceOpening(opening.getParams()).valid) {
+      return false;
+    }
+
+    this.openingList.push(opening);
+    opening.setWall(this);
+    this.add(opening);
+
+    this.updateGeometry();
+
+    return true;
+  }
+
+  /**
+   * Detaches an opening so the wall becomes solid again.
+   *
+   * The opening itself is not disposed; the caller keeps ownership of it.
+   */
+  removeOpening(opening: Opening): boolean {
+    const index = this.openingList.indexOf(opening);
+
+    if (index === -1) {
+      return false;
+    }
+
+    this.openingList.splice(index, 1);
+    this.remove(opening);
+    opening.setWall(null);
+
+    this.updateGeometry();
+
+    return true;
+  }
+
+  /**
+   * Resizes / moves an existing opening, rejecting invalid results.
+   */
+  updateOpening(opening: Opening, params: OpeningParams): boolean {
+    if (!this.openingList.includes(opening)) {
+      return false;
+    }
+
+    if (!this.canPlaceOpening(params, opening).valid) {
+      return false;
+    }
+
+    opening.setParams(params);
+    this.updateGeometry();
+
+    return true;
+  }
+
+  /**
+   * Drops openings that no longer fit after the wall changed.
+   *
+   * Openings are checked in placement order, so the oldest ones win.
+   */
+  private pruneInvalidOpenings(): void {
+    if (this.openingList.length === 0) {
+      return;
+    }
+
+    const length = this.getLength();
+    const kept: Opening[] = [];
+    const removed: Opening[] = [];
+
+    for (const opening of this.openingList) {
+      const validation = validateOpeningPlacement(
+        opening.getParams(),
+        length,
+        this.height,
+        kept.map((other) => other.getFootprint()),
+      );
+
+      if (validation.valid) {
+        kept.push(opening);
+      } else {
+        removed.push(opening);
+      }
+    }
+
+    if (removed.length === 0) {
+      return;
+    }
+
+    this.openingList.length = 0;
+    this.openingList.push(...kept);
+
+    for (const opening of removed) {
+      this.remove(opening);
+      opening.setWall(null);
+    }
+
+    this.onOpeningsRemoved?.(removed);
+  }
+
+  // --------------------------------
+  // Geometry
+  // --------------------------------
+
   updateGeometry(): void {
     const orientation = this.getOrientation();
-    const length = this.getLength();
 
     // Prevent 0-dimension geometry errors
-    const safeLength = Math.max(length, 0.001);
+    const safeLength = Math.max(this.getLength(), 0.001);
     const safeHeight = Math.max(this.height, 0.01);
     const safeWidth = Math.max(this.width, 0.01);
 
-    let dimX: number;
-    let dimZ: number;
+    this.pruneInvalidOpenings();
 
-    if (orientation === 'x') {
-      dimX = safeLength;
-      dimZ = safeWidth;
-    } else {
-      dimX = safeWidth;
-      dimZ = safeLength;
-    }
+    const cutouts = this.openingList.map((opening) => opening.getFootprint());
 
-    const newGeo = new THREE.BoxGeometry(dimX, safeHeight, dimZ);
+    const newGeo = createProfileGeometry(
+      safeLength,
+      safeHeight,
+      safeWidth,
+      cutouts,
+    );
 
     if (this.geometry) {
       this.geometry.dispose();
     }
     this.geometry = newGeo;
 
-    // Calculate center position
+    // The profile runs along local X and starts at local y = 0, so the wall is
+    // centred horizontally and stands on the floor.
     const midX = (this.startPoint.x + this.endPoint.x) / 2;
-    const midY = safeHeight / 2;
     const midZ = (this.startPoint.z + this.endPoint.z) / 2;
 
-    this.position.set(midX, midY, midZ);
+    this.position.set(midX, 0, midZ);
+    this.rotation.set(0, orientation === 'x' ? 0 : -Math.PI / 2, 0);
+
+    // Openings depend on the wall length and thickness.
+    for (const opening of this.openingList) {
+      opening.build();
+    }
+
+    // Keep picking correct even between two renders.
+    this.updateMatrixWorld(true);
 
     if (this.edgesMesh) {
       if (this.edgesMesh.geometry) {
@@ -170,7 +333,27 @@ export class WallMesh extends BaseMesh {
     }
   }
 
+  /**
+   * Converts a world space point (typically a raycast hit) into the distance
+   * along the wall, measured from its min end.
+   */
+  getDistanceAlongWall(worldPoint: THREE.Vector3): number {
+    this.updateWorldMatrix(true, false);
+
+    const local = this.worldToLocal(worldPoint.clone());
+
+    return local.x + this.getLength() / 2;
+  }
+
   override dispose(): void {
+    for (const opening of this.openingList) {
+      this.remove(opening);
+      opening.setWall(null);
+      opening.dispose();
+    }
+    this.openingList.length = 0;
+    this.onOpeningsRemoved = undefined;
+
     if (this.edgesMesh) {
       this.edgesMesh.geometry.dispose();
       if (Array.isArray(this.edgesMesh.material)) {

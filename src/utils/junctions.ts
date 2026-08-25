@@ -185,7 +185,7 @@ function snapZWall(
   walls: WallMesh[],
 ): JunctionResult {
   let wallX = rawStart.x;
-  let startX = rawStart.x;
+  const startX = rawStart.x;
   let endX = rawEnd.x;
   let startZ = rawStart.z;
   let endZ = rawEnd.z;

@@ -5,6 +5,7 @@ import { Engine } from './engine/Engine';
 import { GridComponent } from './components/GridComponent';
 import { OrbitControlsComponent } from './components/OrbitControlsComponent';
 import { RaycastComponent } from './components/RaycastComponent';
+import { RoomComponent } from './components/RoomComponent';
 import { WallToolComponent } from './components/WallToolComponent';
 import { UIOverlay } from './ui/UIOverlay';
 
@@ -13,6 +14,7 @@ import './App.css';
 function App() {
   const containerRef = useRef<HTMLDivElement>(null);
   const [wallTool, setWallTool] = useState<WallToolComponent | null>(null);
+  const [roomTool, setRoomTool] = useState<RoomComponent | null>(null);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -61,6 +63,13 @@ function App() {
     const wallToolComp = world.add(WallToolComponent);
     setWallTool(wallToolComp);
 
+    /*
+     * RoomComponent derives rooms from the walls owned by the wall tool,
+     * so it is registered after it.
+     */
+    const roomComp = world.add(RoomComponent);
+    setRoomTool(roomComp);
+
     // --------------------------------
     // Start application
     // --------------------------------
@@ -73,6 +82,7 @@ function App() {
 
     return () => {
       setWallTool(null);
+      setRoomTool(null);
       engine.dispose();
     };
   }, []);
@@ -80,7 +90,7 @@ function App() {
   return (
     <main className="app">
       <div ref={containerRef} className="three-container" />
-      <UIOverlay wallTool={wallTool} />
+      <UIOverlay wallTool={wallTool} roomTool={roomTool} />
     </main>
   );
 }

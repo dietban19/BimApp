@@ -3,6 +3,7 @@ import type {
   ToolMode,
   WallToolComponent,
 } from '../components/WallToolComponent';
+import type { RoomComponent, RoomInfo } from '../components/RoomComponent';
 import type { WallMesh } from '../objects/WallMesh';
 import type { Opening } from '../objects/openings/Opening';
 import { OPENING_LABELS, isGroundedOpeningType } from '../types/Opening';
@@ -10,6 +11,7 @@ import './UIOverlay.css';
 
 interface UIOverlayProps {
   wallTool: WallToolComponent | null;
+  roomTool: RoomComponent | null;
 }
 
 const MODE_BUTTONS: ReadonlyArray<{ mode: ToolMode; label: string }> = [
@@ -34,12 +36,66 @@ function parseNonNegative(value: string): number | null {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
+interface RoomPanelProps {
+  roomTool: RoomComponent;
+}
+
+const RoomPanel: React.FC<RoomPanelProps> = ({ roomTool }) => {
+  const rooms = roomTool.rooms;
+
+  return (
+    <div className="ui-inspector">
+      <h3 className="ui-section-title">Rooms ({rooms.length})</h3>
+
+      <div className="ui-mode-toggle">
+        <button
+          type="button"
+          className={`ui-btn ${roomTool.showFloors ? 'active' : ''}`}
+          onClick={() => roomTool.toggleFloors()}
+        >
+          🟦 Floors
+        </button>
+        <button
+          type="button"
+          className={`ui-btn ${roomTool.showLabels ? 'active' : ''}`}
+          onClick={() => roomTool.toggleLabels()}
+        >
+          🏷️ Labels
+        </button>
+      </div>
+
+      {rooms.length === 0 ? (
+        <div className="ui-instruction">
+          No rooms yet. Close a region with walls and it is detected
+          automatically.
+        </div>
+      ) : (
+        <ul className="ui-list">
+          {rooms.map((room) => (
+            <li key={room.id} className="ui-list-item">
+              <span>{room.name}</span>
+              <span>
+                {room.area.toFixed(2)} m² · {room.walls.length} walls
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+};
+
 interface WallInspectorProps {
   wallTool: WallToolComponent;
   wall: WallMesh;
+  rooms: RoomInfo[];
 }
 
-const WallInspector: React.FC<WallInspectorProps> = ({ wallTool, wall }) => (
+const WallInspector: React.FC<WallInspectorProps> = ({
+  wallTool,
+  wall,
+  rooms,
+}) => (
   <div className="ui-inspector">
     <h3 className="ui-section-title">Selected Wall Details</h3>
 
@@ -111,6 +167,15 @@ const WallInspector: React.FC<WallInspectorProps> = ({ wallTool, wall }) => (
     <div className="ui-field-readonly">
       <span>Openings:</span>
       <strong>{wall.openings.length}</strong>
+    </div>
+
+    <div className="ui-field-readonly">
+      <span>Bounds rooms:</span>
+      <strong>
+        {rooms.length === 0
+          ? 'None'
+          : rooms.map((room) => room.name).join(', ')}
+      </strong>
     </div>
 
     {wall.openings.length > 0 && (
@@ -249,7 +314,7 @@ const OpeningInspector: React.FC<OpeningInspectorProps> = ({
   );
 };
 
-export const UIOverlay: React.FC<UIOverlayProps> = ({ wallTool }) => {
+export const UIOverlay: React.FC<UIOverlayProps> = ({ wallTool, roomTool }) => {
   const [, forceUpdate] = useReducer((x) => x + 1, 0);
 
   useEffect(() => {
@@ -263,6 +328,18 @@ export const UIOverlay: React.FC<UIOverlayProps> = ({ wallTool }) => {
       unsubscribe();
     };
   }, [wallTool]);
+
+  useEffect(() => {
+    if (!roomTool) return;
+
+    const unsubscribe = roomTool.subscribe(() => {
+      forceUpdate();
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [roomTool]);
 
   if (!wallTool) {
     return null;
@@ -344,9 +421,16 @@ export const UIOverlay: React.FC<UIOverlayProps> = ({ wallTool }) => {
           )}
         </div>
 
+        {/* Detected rooms */}
+        {roomTool && <RoomPanel roomTool={roomTool} />}
+
         {/* Inspectors */}
         {isSelect && selectedWall && (
-          <WallInspector wallTool={wallTool} wall={selectedWall} />
+          <WallInspector
+            wallTool={wallTool}
+            wall={selectedWall}
+            rooms={roomTool?.getRoomsForWall(selectedWall) ?? []}
+          />
         )}
 
         {isSelect && selectedOpening && (

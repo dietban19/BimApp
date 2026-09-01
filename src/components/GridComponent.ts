@@ -29,6 +29,11 @@ export class GridComponent extends Component {
     THREE.MeshBasicMaterial
   >;
 
+  private shadowPlane?: THREE.Mesh<
+    THREE.PlaneGeometry,
+    THREE.ShadowMaterial
+  >;
+
   private highlight?: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
 
   private raycaster?: RaycastComponent;
@@ -65,6 +70,8 @@ export class GridComponent extends Component {
     this.createGrid();
 
     this.createRaycastPlane();
+
+    this.createShadowPlane();
 
     this.createHighlight();
 
@@ -172,6 +179,14 @@ export class GridComponent extends Component {
       this.raycastPlane.material.dispose();
     }
 
+    if (this.shadowPlane) {
+      this.world.scene.remove(this.shadowPlane);
+
+      this.shadowPlane.geometry.dispose();
+
+      this.shadowPlane.material.dispose();
+    }
+
     if (this.highlight) {
       this.world.scene.remove(this.highlight);
 
@@ -183,6 +198,7 @@ export class GridComponent extends Component {
     this.grid = undefined;
     this.axes = undefined;
     this.raycastPlane = undefined;
+    this.shadowPlane = undefined;
     this.highlight = undefined;
   }
 
@@ -217,6 +233,22 @@ export class GridComponent extends Component {
     this.raycastPlane.rotation.x = -Math.PI / 2;
 
     this.world.scene.add(this.raycastPlane);
+  }
+
+  private createShadowPlane(): void {
+    const geometry = new THREE.PlaneGeometry(this.size * 2, this.size * 2);
+
+    const material = new THREE.ShadowMaterial({
+      opacity: 0.35,
+      depthWrite: false,
+    });
+
+    this.shadowPlane = new THREE.Mesh(geometry, material);
+    this.shadowPlane.rotation.x = -Math.PI / 2;
+    this.shadowPlane.position.y = -0.001;
+    this.shadowPlane.receiveShadow = true;
+
+    this.world.scene.add(this.shadowPlane);
   }
 
   private createHighlight(): void {

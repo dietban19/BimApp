@@ -4,6 +4,8 @@ import { GridComponent } from './GridComponent';
 import { RaycastComponent } from './RaycastComponent';
 import { WallMesh } from '../objects/WallMesh';
 import { Opening } from '../objects/openings/Opening';
+import { WindowMesh } from '../objects/openings/WindowMesh';
+import { DoorMesh } from '../objects/openings/DoorMesh';
 import {
   createDefaultOpeningParams,
   createOpening,
@@ -121,7 +123,9 @@ export class WallToolComponent extends Component {
   > | null = null;
 
   private ambientLight?: THREE.AmbientLight;
+  private hemiLight?: THREE.HemisphereLight;
   private directionalLight?: THREE.DirectionalLight;
+  private fillLight?: THREE.DirectionalLight;
 
   private readonly listeners = new Set<() => void>();
 
@@ -198,6 +202,21 @@ export class WallToolComponent extends Component {
   // Wall properties
   // --------------------------------
 
+  setSelectedWallMaterial(material: THREE.Material, materialId?: string): void {
+    if (this.selectedWall) {
+      this.selectedWall.setPreviewMaterial(null);
+      this.selectedWall.setCustomMaterial(material, materialId);
+      this.notify();
+    }
+  }
+
+  previewWallMaterial(material: THREE.Material | null): void {
+    if (this.selectedWall) {
+      this.selectedWall.setPreviewMaterial(material);
+      this.notify();
+    }
+  }
+
   setSelectedWallHeight(height: number): void {
     if (this.selectedWall && height > 0) {
       this.selectedWall.setHeight(height);
@@ -251,6 +270,43 @@ export class WallToolComponent extends Component {
   // --------------------------------
   // Opening properties
   // --------------------------------
+
+  setSelectedOpeningGlassMaterial(material: THREE.Material, materialId?: string): void {
+    if (this.selectedOpening instanceof WindowMesh) {
+      this.selectedOpening.setPreviewMaterial(null);
+      this.selectedOpening.setGlassMaterial(material, materialId);
+      this.notify();
+    }
+  }
+
+  previewOpeningGlassMaterial(material: THREE.Material | null): void {
+    if (this.selectedOpening instanceof WindowMesh) {
+      this.selectedOpening.setPreviewMaterial(material);
+      this.notify();
+    }
+  }
+
+  setSelectedOpeningLeafMaterial(material: THREE.Material, materialId?: string): void {
+    if (this.selectedOpening instanceof DoorMesh) {
+      this.selectedOpening.setPreviewMaterial(null);
+      this.selectedOpening.setLeafMaterial(material, materialId);
+      this.notify();
+    }
+  }
+
+  previewOpeningLeafMaterial(material: THREE.Material | null): void {
+    if (this.selectedOpening instanceof DoorMesh) {
+      this.selectedOpening.setPreviewMaterial(material);
+      this.notify();
+    }
+  }
+
+  setSelectedOpeningFrameMaterial(material: THREE.Material, materialId?: string): void {
+    if (this.selectedOpening instanceof WindowMesh || this.selectedOpening instanceof DoorMesh) {
+      this.selectedOpening.setFrameMaterial(material, materialId);
+      this.notify();
+    }
+  }
 
   setSelectedOpeningWidth(width: number): void {
     this.updateSelectedOpening({ width });
@@ -354,12 +410,32 @@ export class WallToolComponent extends Component {
     });
 
     if (!hasLight) {
-      this.ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
-      this.directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-      this.directionalLight.position.set(10, 20, 15);
+      this.hemiLight = new THREE.HemisphereLight(0xe0f2fe, 0x1e293b, 0.65);
+      this.hemiLight.position.set(0, 50, 0);
 
+      this.ambientLight = new THREE.AmbientLight(0xffffff, 0.35);
+
+      this.directionalLight = new THREE.DirectionalLight(0xfffaed, 1.5);
+      this.directionalLight.position.set(25, 35, 20);
+      this.directionalLight.castShadow = true;
+      this.directionalLight.shadow.mapSize.width = 2048;
+      this.directionalLight.shadow.mapSize.height = 2048;
+      this.directionalLight.shadow.camera.near = 0.5;
+      this.directionalLight.shadow.camera.far = 150;
+      this.directionalLight.shadow.camera.left = -40;
+      this.directionalLight.shadow.camera.right = 40;
+      this.directionalLight.shadow.camera.top = 40;
+      this.directionalLight.shadow.camera.bottom = -40;
+      this.directionalLight.shadow.bias = -0.0001;
+      this.directionalLight.shadow.normalBias = 0.02;
+
+      this.fillLight = new THREE.DirectionalLight(0x94a3b8, 0.45);
+      this.fillLight.position.set(-20, 15, -15);
+
+      this.world.scene.add(this.hemiLight);
       this.world.scene.add(this.ambientLight);
       this.world.scene.add(this.directionalLight);
+      this.world.scene.add(this.fillLight);
     }
   }
 
@@ -1179,6 +1255,11 @@ export class WallToolComponent extends Component {
     }
     this.walls.clear();
 
+    if (this.hemiLight) {
+      this.world.scene.remove(this.hemiLight);
+      this.hemiLight.dispose();
+    }
+
     if (this.ambientLight) {
       this.world.scene.remove(this.ambientLight);
       this.ambientLight.dispose();
@@ -1187,6 +1268,11 @@ export class WallToolComponent extends Component {
     if (this.directionalLight) {
       this.world.scene.remove(this.directionalLight);
       this.directionalLight.dispose();
+    }
+
+    if (this.fillLight) {
+      this.world.scene.remove(this.fillLight);
+      this.fillLight.dispose();
     }
 
     this.listeners.clear();

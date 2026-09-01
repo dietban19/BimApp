@@ -1,4 +1,4 @@
-import React, { useEffect, useReducer } from 'react';
+import React, { useEffect, useReducer, useState } from 'react';
 import type {
   ToolMode,
   WallToolComponent,
@@ -6,7 +6,11 @@ import type {
 import type { RoomComponent, RoomInfo } from '../components/RoomComponent';
 import type { WallMesh } from '../objects/WallMesh';
 import type { Opening } from '../objects/openings/Opening';
+import { WindowMesh } from '../objects/openings/WindowMesh';
+import { DoorMesh } from '../objects/openings/DoorMesh';
 import { OPENING_LABELS, isGroundedOpeningType } from '../types/Opening';
+import { CollapsibleSection } from './CollapsibleSection';
+import { MaterialPicker } from './MaterialPicker';
 import './UIOverlay.css';
 
 interface UIOverlayProps {
@@ -41,46 +45,51 @@ interface RoomPanelProps {
 }
 
 const RoomPanel: React.FC<RoomPanelProps> = ({ roomTool }) => {
+  const [isOpen, setIsOpen] = useState(false);
   const rooms = roomTool.rooms;
 
   return (
     <div className="ui-inspector">
-      <h3 className="ui-section-title">Rooms ({rooms.length})</h3>
-
-      <div className="ui-mode-toggle">
-        <button
-          type="button"
-          className={`ui-btn ${roomTool.showFloors ? 'active' : ''}`}
-          onClick={() => roomTool.toggleFloors()}
-        >
-          🟦 Floors
-        </button>
-        <button
-          type="button"
-          className={`ui-btn ${roomTool.showLabels ? 'active' : ''}`}
-          onClick={() => roomTool.toggleLabels()}
-        >
-          🏷️ Labels
-        </button>
-      </div>
-
-      {rooms.length === 0 ? (
-        <div className="ui-instruction">
-          No rooms yet. Close a region with walls and it is detected
-          automatically.
+      <CollapsibleSection
+        title={`Rooms (${rooms.length})`}
+        isOpen={isOpen}
+        onToggle={() => setIsOpen(!isOpen)}
+        icon="🏠"
+      >
+        <div className="ui-mode-toggle" style={{ marginTop: '8px' }}>
+          <button
+            type="button"
+            className={`ui-btn ${roomTool.showFloors ? 'active' : ''}`}
+            onClick={() => roomTool.toggleFloors()}
+          >
+            🟦 Floors
+          </button>
+          <button
+            type="button"
+            className={`ui-btn ${roomTool.showLabels ? 'active' : ''}`}
+            onClick={() => roomTool.toggleLabels()}
+          >
+            🏷️ Labels
+          </button>
         </div>
-      ) : (
-        <ul className="ui-list">
-          {rooms.map((room) => (
-            <li key={room.id} className="ui-list-item">
-              <span>{room.name}</span>
-              <span>
-                {room.area.toFixed(2)} m² · {room.walls.length} walls
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
+
+        {rooms.length === 0 ? (
+          <div className="ui-instruction" style={{ marginTop: '8px' }}>
+            No rooms yet. Close a region with walls and it is detected automatically.
+          </div>
+        ) : (
+          <ul className="ui-list" style={{ marginTop: '8px' }}>
+            {rooms.map((room) => (
+              <li key={room.id} className="ui-list-item">
+                <span>{room.name}</span>
+                <span>
+                  {room.area.toFixed(2)} m² · {room.walls.length} walls
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </CollapsibleSection>
     </div>
   );
 };
@@ -95,119 +104,159 @@ const WallInspector: React.FC<WallInspectorProps> = ({
   wallTool,
   wall,
   rooms,
-}) => (
-  <div className="ui-inspector">
-    <h3 className="ui-section-title">Selected Wall Details</h3>
+}) => {
+  const [dimensionsOpen, setDimensionsOpen] = useState(true);
+  const [materialsOpen, setMaterialsOpen] = useState(true);
+  const [openingsOpen, setOpeningsOpen] = useState(true);
 
-    <button
-      type="button"
-      className={`ui-btn ${wallTool.resizeMode ? 'active' : ''}`}
-      onClick={() => wallTool.toggleResizeMode()}
-    >
-      {wallTool.resizeMode ? '✋ Stop Resize' : '↔️ Resize Wall'}
-    </button>
+  return (
+    <div className="ui-inspector">
+      <h3 className="ui-section-title">Selected Wall Details</h3>
 
-    {wallTool.resizeMode && (
-      <div className="ui-instruction">
-        Click an end node to open the gumball, click the gumball arrow to start
-        resize, move the mouse, then click once to finish.
-      </div>
-    )}
+      {/* Dimensions & Properties Section */}
+      <CollapsibleSection
+        title="Dimensions & Properties"
+        isOpen={dimensionsOpen}
+        onToggle={() => setDimensionsOpen(!dimensionsOpen)}
+        icon="📐"
+      >
+        <button
+          type="button"
+          className={`ui-btn ${wallTool.resizeMode ? 'active' : ''}`}
+          onClick={() => wallTool.toggleResizeMode()}
+          style={{ width: '100%', marginBottom: '8px' }}
+        >
+          {wallTool.resizeMode ? '✋ Stop Resize' : '↔️ Resize Wall'}
+        </button>
 
-    {wallTool.resizeError && (
-      <div className="ui-error-text">{wallTool.resizeError}</div>
-    )}
+        {wallTool.resizeMode && (
+          <div className="ui-instruction">
+            Click an end node to open the gumball, click the gumball arrow to start
+            resize, move the mouse, then click once to finish.
+          </div>
+        )}
 
-    <div className="ui-field">
-      <label htmlFor="wall-height">Height (m):</label>
-      <input
-        id="wall-height"
-        type="number"
-        step="0.1"
-        min="0.1"
-        max="20"
-        value={wall.height}
-        onChange={(event) => {
-          const value = parsePositive(event.target.value);
-          if (value !== null) {
-            wallTool.setSelectedWallHeight(value);
-          }
-        }}
-      />
+        {wallTool.resizeError && (
+          <div className="ui-error-text">{wallTool.resizeError}</div>
+        )}
+
+        <div className="ui-field">
+          <label htmlFor="wall-height">Height (m):</label>
+          <input
+            id="wall-height"
+            type="number"
+            step="0.1"
+            min="0.1"
+            max="20"
+            value={wall.height}
+            onChange={(event) => {
+              const value = parsePositive(event.target.value);
+              if (value !== null) {
+                wallTool.setSelectedWallHeight(value);
+              }
+            }}
+          />
+        </div>
+
+        <div className="ui-field">
+          <label htmlFor="wall-width">Width / Thickness (m):</label>
+          <input
+            id="wall-width"
+            type="number"
+            step="0.05"
+            min="0.05"
+            max="5"
+            value={wall.width}
+            onChange={(event) => {
+              const value = parsePositive(event.target.value);
+              if (value !== null) {
+                wallTool.setSelectedWallWidth(value);
+              }
+            }}
+          />
+        </div>
+
+        <div className="ui-field-readonly">
+          <span>Length:</span>
+          <strong>{wall.getLength().toFixed(2)} m</strong>
+        </div>
+
+        <div className="ui-field-readonly">
+          <span>Orientation:</span>
+          <strong>{wall.getOrientation().toUpperCase()}-axis</strong>
+        </div>
+
+        <div className="ui-field-readonly">
+          <span>Bounds rooms:</span>
+          <strong>
+            {rooms.length === 0
+              ? 'None'
+              : rooms.map((room) => room.name).join(', ')}
+          </strong>
+        </div>
+
+        <button
+          type="button"
+          className="ui-btn ui-btn-danger"
+          onClick={() => wallTool.deleteSelectedWall()}
+          style={{ width: '100%' }}
+        >
+          🗑️ Delete Wall
+        </button>
+      </CollapsibleSection>
+
+      {/* Materials Section */}
+      <CollapsibleSection
+        title="Wall Materials"
+        isOpen={materialsOpen}
+        onToggle={() => setMaterialsOpen(!materialsOpen)}
+        icon="🎨"
+      >
+        <MaterialPicker
+          title="Wall Finish"
+          currentMaterialId={wall.getCustomMaterialId() ?? 'wall-plaster'}
+          allowedCategories={['wall', 'concrete', 'wood', 'tiles']}
+          onSelectMaterial={(material, materialId) => {
+            wallTool.setSelectedWallMaterial(material, materialId);
+          }}
+          onPreviewMaterial={(material) => {
+            wallTool.previewWallMaterial(material);
+          }}
+        />
+      </CollapsibleSection>
+
+      {/* Openings Section */}
+      {wall.openings.length > 0 && (
+        <CollapsibleSection
+          title={`Wall Openings (${wall.openings.length})`}
+          isOpen={openingsOpen}
+          onToggle={() => setOpeningsOpen(!openingsOpen)}
+          icon="🚪"
+          badge={wall.openings.length}
+        >
+          <ul className="ui-list">
+            {wall.openings.map((opening) => (
+              <li key={opening.meshId} className="ui-list-item">
+                <span>
+                  {OPENING_ICONS[opening.type]} {OPENING_LABELS[opening.type]} @{' '}
+                  {opening.distanceAlongWall.toFixed(2)} m
+                </span>
+                <button
+                  type="button"
+                  className="ui-icon-btn"
+                  title="Remove this opening"
+                  onClick={() => wallTool.deleteOpening(opening)}
+                >
+                  ✕
+                </button>
+              </li>
+            ))}
+          </ul>
+        </CollapsibleSection>
+      )}
     </div>
-
-    <div className="ui-field">
-      <label htmlFor="wall-width">Width / Thickness (m):</label>
-      <input
-        id="wall-width"
-        type="number"
-        step="0.05"
-        min="0.05"
-        max="5"
-        value={wall.width}
-        onChange={(event) => {
-          const value = parsePositive(event.target.value);
-          if (value !== null) {
-            wallTool.setSelectedWallWidth(value);
-          }
-        }}
-      />
-    </div>
-
-    <div className="ui-field-readonly">
-      <span>Length:</span>
-      <strong>{wall.getLength().toFixed(2)} m</strong>
-    </div>
-
-    <div className="ui-field-readonly">
-      <span>Orientation:</span>
-      <strong>{wall.getOrientation().toUpperCase()}-axis</strong>
-    </div>
-
-    <div className="ui-field-readonly">
-      <span>Openings:</span>
-      <strong>{wall.openings.length}</strong>
-    </div>
-
-    <div className="ui-field-readonly">
-      <span>Bounds rooms:</span>
-      <strong>
-        {rooms.length === 0
-          ? 'None'
-          : rooms.map((room) => room.name).join(', ')}
-      </strong>
-    </div>
-
-    {wall.openings.length > 0 && (
-      <ul className="ui-list">
-        {wall.openings.map((opening) => (
-          <li key={opening.meshId} className="ui-list-item">
-            <span>
-              {OPENING_ICONS[opening.type]} {OPENING_LABELS[opening.type]} @{' '}
-              {opening.distanceAlongWall.toFixed(2)} m
-            </span>
-            <button
-              type="button"
-              className="ui-icon-btn"
-              title="Remove this opening"
-              onClick={() => wallTool.deleteOpening(opening)}
-            >
-              ✕
-            </button>
-          </li>
-        ))}
-      </ul>
-    )}
-
-    <button
-      type="button"
-      className="ui-btn ui-btn-danger"
-      onClick={() => wallTool.deleteSelectedWall()}
-    >
-      🗑️ Delete Wall
-    </button>
-  </div>
-);
+  );
+};
 
 interface OpeningInspectorProps {
   wallTool: WallToolComponent;
@@ -220,96 +269,179 @@ const OpeningInspector: React.FC<OpeningInspectorProps> = ({
 }) => {
   const label = OPENING_LABELS[opening.type];
   const wallLength = opening.wall?.getLength() ?? 0;
+  const isWindow = opening instanceof WindowMesh;
+  const isDoor = opening instanceof DoorMesh;
+
+  const [dimensionsOpen, setDimensionsOpen] = useState(true);
+  const [glassMaterialOpen, setGlassMaterialOpen] = useState(true);
+  const [leafMaterialOpen, setLeafMaterialOpen] = useState(true);
+  const [frameMaterialOpen, setFrameMaterialOpen] = useState(false);
 
   return (
     <div className="ui-inspector">
       <h3 className="ui-section-title">Selected {label} Details</h3>
 
-      <div className="ui-field">
-        <label htmlFor="opening-width">Width (m):</label>
-        <input
-          id="opening-width"
-          type="number"
-          step="0.05"
-          min="0.1"
-          max="10"
-          value={opening.width}
-          onChange={(event) => {
-            const value = parsePositive(event.target.value);
-            if (value !== null) {
-              wallTool.setSelectedOpeningWidth(value);
-            }
-          }}
-        />
-      </div>
-
-      <div className="ui-field">
-        <label htmlFor="opening-height">Height (m):</label>
-        <input
-          id="opening-height"
-          type="number"
-          step="0.05"
-          min="0.1"
-          max="10"
-          value={opening.height}
-          onChange={(event) => {
-            const value = parsePositive(event.target.value);
-            if (value !== null) {
-              wallTool.setSelectedOpeningHeight(value);
-            }
-          }}
-        />
-      </div>
-
-      {!isGroundedOpeningType(opening.type) && (
+      {/* Dimensions & Placement Section */}
+      <CollapsibleSection
+        title="Dimensions & Placement"
+        isOpen={dimensionsOpen}
+        onToggle={() => setDimensionsOpen(!dimensionsOpen)}
+        icon="📐"
+      >
         <div className="ui-field">
-          <label htmlFor="opening-sill">Sill Height (m):</label>
+          <label htmlFor="opening-width">Width (m):</label>
           <input
-            id="opening-sill"
+            id="opening-width"
             type="number"
             step="0.05"
-            min="0"
+            min="0.1"
             max="10"
-            value={opening.sillHeight}
+            value={opening.width}
             onChange={(event) => {
-              const value = parseNonNegative(event.target.value);
+              const value = parsePositive(event.target.value);
               if (value !== null) {
-                wallTool.setSelectedOpeningSillHeight(value);
+                wallTool.setSelectedOpeningWidth(value);
               }
             }}
           />
         </div>
+
+        <div className="ui-field">
+          <label htmlFor="opening-height">Height (m):</label>
+          <input
+            id="opening-height"
+            type="number"
+            step="0.05"
+            min="0.1"
+            max="10"
+            value={opening.height}
+            onChange={(event) => {
+              const value = parsePositive(event.target.value);
+              if (value !== null) {
+                wallTool.setSelectedOpeningHeight(value);
+              }
+            }}
+          />
+        </div>
+
+        {!isGroundedOpeningType(opening.type) && (
+          <div className="ui-field">
+            <label htmlFor="opening-sill">Sill Height (m):</label>
+            <input
+              id="opening-sill"
+              type="number"
+              step="0.05"
+              min="0"
+              max="10"
+              value={opening.sillHeight}
+              onChange={(event) => {
+                const value = parseNonNegative(event.target.value);
+                if (value !== null) {
+                  wallTool.setSelectedOpeningSillHeight(value);
+                }
+              }}
+            />
+          </div>
+        )}
+
+        <div className="ui-field">
+          <label htmlFor="opening-distance">Position Along Wall (m):</label>
+          <input
+            id="opening-distance"
+            type="number"
+            step="0.05"
+            min="0"
+            max={wallLength}
+            value={opening.distanceAlongWall}
+            onChange={(event) => {
+              const value = parseNonNegative(event.target.value);
+              if (value !== null) {
+                wallTool.setSelectedOpeningDistance(value);
+              }
+            }}
+          />
+        </div>
+
+        {wallTool.openingEditError && (
+          <div className="ui-error-text">{wallTool.openingEditError}</div>
+        )}
+
+        <button
+          type="button"
+          className="ui-btn ui-btn-danger"
+          onClick={() => wallTool.deleteSelectedOpening()}
+          style={{ width: '100%' }}
+        >
+          🗑️ Delete {label}
+        </button>
+      </CollapsibleSection>
+
+      {/* Window Glass Material Section */}
+      {isWindow && (
+        <CollapsibleSection
+          title="Glass Material"
+          isOpen={glassMaterialOpen}
+          onToggle={() => setGlassMaterialOpen(!glassMaterialOpen)}
+          icon="🪟"
+        >
+          <MaterialPicker
+            title="Physical Glass"
+            currentMaterialId={(opening as WindowMesh).glassMaterialId}
+            allowedCategories={['glass']}
+            onSelectMaterial={(material, materialId) => {
+              wallTool.setSelectedOpeningGlassMaterial(material, materialId);
+            }}
+            onPreviewMaterial={(material) => {
+              wallTool.previewOpeningGlassMaterial(material);
+            }}
+          />
+        </CollapsibleSection>
       )}
 
-      <div className="ui-field">
-        <label htmlFor="opening-distance">Position Along Wall (m):</label>
-        <input
-          id="opening-distance"
-          type="number"
-          step="0.05"
-          min="0"
-          max={wallLength}
-          value={opening.distanceAlongWall}
-          onChange={(event) => {
-            const value = parseNonNegative(event.target.value);
-            if (value !== null) {
-              wallTool.setSelectedOpeningDistance(value);
+      {/* Door Leaf Material Section */}
+      {isDoor && (
+        <CollapsibleSection
+          title="Door Leaf Material"
+          isOpen={leafMaterialOpen}
+          onToggle={() => setLeafMaterialOpen(!leafMaterialOpen)}
+          icon="🚪"
+        >
+          <MaterialPicker
+            title="Leaf Surface"
+            currentMaterialId={(opening as DoorMesh).leafMaterialId}
+            allowedCategories={['wood', 'metal']}
+            onSelectMaterial={(material, materialId) => {
+              wallTool.setSelectedOpeningLeafMaterial(material, materialId);
+            }}
+            onPreviewMaterial={(material) => {
+              wallTool.previewOpeningLeafMaterial(material);
+            }}
+          />
+        </CollapsibleSection>
+      )}
+
+      {/* Frame Material Section */}
+      {(isWindow || isDoor) && (
+        <CollapsibleSection
+          title="Frame Material"
+          isOpen={frameMaterialOpen}
+          onToggle={() => setFrameMaterialOpen(!frameMaterialOpen)}
+          icon="🖼️"
+        >
+          <MaterialPicker
+            title="Frame Finish"
+            currentMaterialId={
+              isWindow
+                ? (opening as WindowMesh).frameMaterialId
+                : (opening as DoorMesh).frameMaterialId
             }
-          }}
-        />
-      </div>
-
-      {wallTool.openingEditError && (
-        <div className="ui-error-text">{wallTool.openingEditError}</div>
+            allowedCategories={['wood', 'metal']}
+            onSelectMaterial={(material, materialId) => {
+              wallTool.setSelectedOpeningFrameMaterial(material, materialId);
+            }}
+          />
+        </CollapsibleSection>
       )}
-
-      <button
-        type="button"
-        className="ui-btn ui-btn-danger"
-        onClick={() => wallTool.deleteSelectedOpening()}
-      >
-        🗑️ Delete {label}
-      </button>
     </div>
   );
 };

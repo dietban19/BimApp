@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { Opening } from './Opening';
 import { createFrameGeometry } from '../../utils/profileGeometry';
 import type { OpeningParams, OpeningType } from '../../types/Opening';
+import { getWoodTexture } from '../../materials/proceduralTextures';
 
 /** Width of the door jamb members. */
 const JAMB_WIDTH = 0.05;
@@ -28,18 +29,58 @@ const HANDLE_HEIGHT = 1.02;
 export class DoorMesh extends Opening {
   readonly type: OpeningType = 'door';
 
+  leafMaterialId = 'wall-oak';
+  frameMaterialId = 'trim-white';
+
+  private frameMaterial: THREE.Material;
+
   constructor(params: OpeningParams, isPreview = false) {
     super(params, isPreview);
 
-    this.replaceMaterials(
-      new THREE.MeshStandardMaterial({
-        color: 0x9a6b43,
-        roughness: 0.65,
-        metalness: 0.05,
-      }),
-      new THREE.MeshStandardMaterial({ color: 0xc79a6b, roughness: 0.55 }),
-      new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.45 }),
-    );
+    const defaultLeaf = new THREE.MeshStandardMaterial({
+      map: getWoodTexture(false),
+      roughness: 0.55,
+      metalness: 0.02,
+    });
+
+    const hoverLeaf = new THREE.MeshStandardMaterial({
+      color: 0x93c5fd,
+      roughness: 0.5,
+      transparent: true,
+      opacity: 0.85,
+    });
+
+    const selectLeaf = new THREE.MeshStandardMaterial({
+      color: 0xf59e0b,
+      roughness: 0.45,
+    });
+
+    this.frameMaterial = new THREE.MeshStandardMaterial({
+      color: 0xf8fafc,
+      roughness: 0.4,
+      metalness: 0.05,
+    });
+
+    this.replaceMaterials(defaultLeaf, hoverLeaf, selectLeaf);
+  }
+
+  setLeafMaterial(material: THREE.Material, id = 'custom'): void {
+    this.leafMaterialId = id;
+    this.setCustomMaterial(material, id);
+  }
+
+  getLeafMaterial(): THREE.Material {
+    return this.customMaterial ?? this.defaultMaterial;
+  }
+
+  setFrameMaterial(material: THREE.Material, id = 'custom'): void {
+    this.frameMaterialId = id;
+    this.frameMaterial = material;
+    this.build();
+  }
+
+  getFrameMaterial(): THREE.Material {
+    return this.frameMaterial;
   }
 
   private getLeafSize(wallThickness: number): {
@@ -79,17 +120,14 @@ export class DoorMesh extends Opening {
     // createFrameGeometry centres on the outer height; realign to the opening.
     jambGeometry.translate(0, FRAME_EMBED / 2, 0);
 
-    const jamb = new THREE.Mesh(
-      jambGeometry,
-      new THREE.MeshStandardMaterial({ color: 0xf3f4f6, roughness: 0.6 }),
-    );
+    const jamb = new THREE.Mesh(jambGeometry, this.frameMaterial);
 
     const handle = new THREE.Mesh(
       new THREE.SphereGeometry(0.035, 14, 10),
       new THREE.MeshStandardMaterial({
         color: 0xfbbf24,
-        metalness: 0.75,
-        roughness: 0.25,
+        metalness: 0.85,
+        roughness: 0.2,
       }),
     );
 
@@ -100,5 +138,10 @@ export class DoorMesh extends Opening {
     );
 
     return [jamb, handle];
+  }
+
+  override dispose(): void {
+    this.frameMaterial.dispose();
+    super.dispose();
   }
 }

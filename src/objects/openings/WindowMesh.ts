@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { Opening } from './Opening';
 import { createFrameGeometry } from '../../utils/profileGeometry';
 import type { OpeningParams, OpeningType } from '../../types/Opening';
+import { createPhysicalGlassMaterial } from '../../materials/materialLibrary';
 
 /** Width of the window frame members. */
 const FRAME_WIDTH = 0.06;
@@ -16,37 +17,73 @@ const FRAME_EMBED = 0.003;
 /** Width of the cross mullions. */
 const MULLION_WIDTH = 0.03;
 
-function createGlassMaterial(
-  color: number,
-  opacity: number,
-): THREE.MeshStandardMaterial {
-  return new THREE.MeshStandardMaterial({
-    color,
-    transparent: true,
-    opacity,
-    roughness: 0.08,
-    metalness: 0.0,
-    side: THREE.DoubleSide,
-  });
-}
-
 /**
  * A window: a hole that floats above floor level, filled with a frame,
- * a pair of mullions and a glazed pane.
+ * a pair of mullions and a glazed physical pane.
  *
  * The pane is the mesh body, so the whole glazed area is pickable.
  */
 export class WindowMesh extends Opening {
   readonly type: OpeningType = 'window';
 
+  glassMaterialId = 'glass-clear';
+  frameMaterialId = 'trim-white';
+
+  private frameMaterial: THREE.Material;
+
   constructor(params: OpeningParams, isPreview = false) {
     super(params, isPreview);
 
-    this.replaceMaterials(
-      createGlassMaterial(0x9ecbff, 0.3),
-      createGlassMaterial(0x60a5fa, 0.5),
-      createGlassMaterial(0xf59e0b, 0.55),
-    );
+    const defaultGlass = createPhysicalGlassMaterial({
+      color: 0xffffff,
+      transmission: 0.94,
+      roughness: 0.03,
+      ior: 1.52,
+      thickness: 0.05,
+    });
+
+    const hoverGlass = createPhysicalGlassMaterial({
+      color: 0x93c5fd,
+      transmission: 0.85,
+      roughness: 0.15,
+      ior: 1.52,
+      thickness: 0.05,
+    });
+
+    const selectGlass = createPhysicalGlassMaterial({
+      color: 0xfde68a,
+      transmission: 0.82,
+      roughness: 0.1,
+      ior: 1.52,
+      thickness: 0.05,
+    });
+
+    this.frameMaterial = new THREE.MeshStandardMaterial({
+      color: 0xf8fafc,
+      roughness: 0.35,
+      metalness: 0.05,
+    });
+
+    this.replaceMaterials(defaultGlass, hoverGlass, selectGlass);
+  }
+
+  setGlassMaterial(material: THREE.Material, id = 'custom'): void {
+    this.glassMaterialId = id;
+    this.setCustomMaterial(material, id);
+  }
+
+  getGlassMaterial(): THREE.Material {
+    return this.customMaterial ?? this.defaultMaterial;
+  }
+
+  setFrameMaterial(material: THREE.Material, id = 'custom'): void {
+    this.frameMaterialId = id;
+    this.frameMaterial = material;
+    this.build();
+  }
+
+  getFrameMaterial(): THREE.Material {
+    return this.frameMaterial;
   }
 
   private getGlassSize(): { width: number; height: number } {
@@ -72,25 +109,25 @@ export class WindowMesh extends Opening {
       thickness: FRAME_WIDTH + FRAME_EMBED,
     });
 
-    const frameMaterial = new THREE.MeshStandardMaterial({
-      color: 0xf3f4f6,
-      roughness: 0.55,
-    });
-
-    const frame = new THREE.Mesh(frameGeometry, frameMaterial);
+    const frame = new THREE.Mesh(frameGeometry, this.frameMaterial);
 
     const mullionDepth = GLASS_THICKNESS + 0.02;
 
     const vertical = new THREE.Mesh(
       new THREE.BoxGeometry(MULLION_WIDTH, glass.height, mullionDepth),
-      frameMaterial,
+      this.frameMaterial,
     );
 
     const horizontal = new THREE.Mesh(
       new THREE.BoxGeometry(glass.width, MULLION_WIDTH, mullionDepth),
-      frameMaterial,
+      this.frameMaterial,
     );
 
     return [frame, vertical, horizontal];
+  }
+
+  override dispose(): void {
+    this.frameMaterial.dispose();
+    super.dispose();
   }
 }

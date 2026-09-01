@@ -59,6 +59,11 @@ export abstract class Opening extends BaseMesh {
       });
 
       this.renderOrder = PREVIEW_RENDER_ORDER;
+      this.castShadow = false;
+      this.receiveShadow = false;
+    } else {
+      this.castShadow = true;
+      this.receiveShadow = true;
     }
   }
 
@@ -143,6 +148,14 @@ export abstract class Opening extends BaseMesh {
     this.clearDecorations();
 
     for (const decoration of this.createDecorations(wallThickness)) {
+      if (!this.isPreview) {
+        decoration.traverse((child) => {
+          if ((child as THREE.Mesh).isMesh) {
+            child.castShadow = true;
+            child.receiveShadow = true;
+          }
+        });
+      }
       this.decorations.push(decoration);
       this.add(decoration);
     }

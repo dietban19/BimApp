@@ -63,6 +63,9 @@ export class RoomMesh extends BaseMesh {
 
     super(RoomMesh.createGeometry(options.polygon), material);
 
+    this.castShadow = false;
+    this.receiveShadow = true;
+
     this.roomId = roomId;
     this.floorMaterial = material;
 

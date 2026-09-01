@@ -1,1510 +1,2699 @@
-diff --git a/src/App.tsx b/src/App.tsx
-index 1fd8b24..0c7ae8c 100644
---- a/src/App.tsx
-+++ b/src/App.tsx
-@@ -5,6 +5,7 @@ import { Engine } from './engine/Engine';
- import { GridComponent } from './components/GridComponent';
- import { OrbitControlsComponent } from './components/OrbitControlsComponent';
- import { RaycastComponent } from './components/RaycastComponent';
-+import { RoomComponent } from './components/RoomComponent';
- import { WallToolComponent } from './components/WallToolComponent';
- import { UIOverlay } from './ui/UIOverlay';
+diff --git a/src/components/GridComponent.ts b/src/components/GridComponent.ts
+index 9722392..82cea0b 100644
+--- a/src/components/GridComponent.ts
++++ b/src/components/GridComponent.ts
+@@ -29,6 +29,11 @@ export class GridComponent extends Component {
+     THREE.MeshBasicMaterial
+   >;
  
-@@ -13,6 +14,7 @@ import './App.css';
- function App() {
-   const containerRef = useRef<HTMLDivElement>(null);
-   const [wallTool, setWallTool] = useState<WallToolComponent | null>(null);
-+  const [roomTool, setRoomTool] = useState<RoomComponent | null>(null);
- 
-   useEffect(() => {
-     const container = containerRef.current;
-@@ -61,6 +63,13 @@ function App() {
-     const wallToolComp = world.add(WallToolComponent);
-     setWallTool(wallToolComp);
- 
-+    /*
-+     * RoomComponent derives rooms from the walls owned by the wall tool,
-+     * so it is registered after it.
-+     */
-+    const roomComp = world.add(RoomComponent);
-+    setRoomTool(roomComp);
-+
-     // --------------------------------
-     // Start application
-     // --------------------------------
-@@ -73,6 +82,7 @@ function App() {
- 
-     return () => {
-       setWallTool(null);
-+      setRoomTool(null);
-       engine.dispose();
-     };
-   }, []);
-@@ -80,7 +90,7 @@ function App() {
-   return (
-     <main className="app">
-       <div ref={containerRef} className="three-container" />
--      <UIOverlay wallTool={wallTool} />
-+      <UIOverlay wallTool={wallTool} roomTool={roomTool} />
-     </main>
-   );
- }
-diff --git a/src/components/RoomComponent.ts b/src/components/RoomComponent.ts
-new file mode 100644
-index 0000000..d3a9a87
---- /dev/null
-+++ b/src/components/RoomComponent.ts
-@@ -0,0 +1,243 @@
-+import { Component } from '../engine/Component';
-+import { WallToolComponent } from './WallToolComponent';
-+import { RoomMesh } from '../objects/RoomMesh';
-+import { detectRooms } from '../utils/roomDetection';
-+import type { World } from '../engine/World';
-+import type { WallMesh } from '../objects/WallMesh';
-+import type { RoomBounds, RoomPoint } from '../types/Room';
-+
-+export interface RoomComponentOptions {
-+  showFloors?: boolean;
-+  showLabels?: boolean;
-+}
-+
-+/** A room as presented to the rest of the application. */
-+export interface RoomInfo {
-+  id: string;
-+  name: string;
-+  area: number;
-+  perimeter: number;
-+  center: RoomPoint;
-+  bounds: RoomBounds;
-+  walls: WallMesh[];
-+}
-+
-+/**
-+ * Keeps the set of rooms in sync with the wall model.
-+ *
-+ * The component owns no editing behaviour of its own: it listens to the wall
-+ * tool, re-runs the detection whenever the wall layout actually changed, and
-+ * mirrors the result into the scene. Placing a wall that closes a region
-+ * therefore creates a room, deleting a boundary wall removes it, and adding
-+ * or removing an interior partition splits or merges the rooms around it.
-+ */
-+export class RoomComponent extends Component {
-+  rooms: RoomInfo[] = [];
-+
-+  showFloors: boolean;
-+  showLabels: boolean;
-+
-+  private wallTool!: WallToolComponent;
-+  private unsubscribeWallTool?: () => void;
-+
-+  private readonly meshes = new Map<string, RoomMesh>();
-+  private readonly listeners = new Set<() => void>();
-+
-+  /** Fingerprint of the wall layout the current rooms were built from. */
-+  private layoutSignature = '';
-+
-+  constructor(world: World, options: RoomComponentOptions = {}) {
-+    super(world);
-+
-+    this.showFloors = options.showFloors ?? true;
-+    this.showLabels = options.showLabels ?? true;
-+  }
-+
-+  init(): void {
-+    this.wallTool = this.world.get(WallToolComponent);
-+    this.unsubscribeWallTool = this.wallTool.subscribe(this.handleModelChanged);
-+
-+    this.refresh(true);
-+  }
-+
-+  subscribe(listener: () => void): () => void {
-+    this.listeners.add(listener);
-+
-+    return () => {
-+      this.listeners.delete(listener);
-+    };
-+  }
-+
-+  /** Rooms the given wall bounds. Shared walls belong to several rooms. */
-+  getRoomsForWall(wall: WallMesh): RoomInfo[] {
-+    return this.rooms.filter((room) => room.walls.includes(wall));
-+  }
-+
-+  setShowFloors(visible: boolean): void {
-+    if (this.showFloors === visible) return;
-+
-+    this.showFloors = visible;
-+    this.applyVisibility();
-+    this.notify();
-+  }
-+
-+  setShowLabels(visible: boolean): void {
-+    if (this.showLabels === visible) return;
-+
-+    this.showLabels = visible;
-+    this.applyVisibility();
-+    this.notify();
-+  }
-+
-+  toggleFloors(): void {
-+    this.setShowFloors(!this.showFloors);
-+  }
-+
-+  toggleLabels(): void {
-+    this.setShowLabels(!this.showLabels);
-+  }
-+
-+  private notify(): void {
-+    for (const listener of this.listeners) {
-+      listener();
-+    }
-+  }
-+
-+  private handleModelChanged = (): void => {
-+    this.refresh(false);
-+  };
-+
-+  /**
-+   * Walls that can act as a room boundary.
-+   *
-+   * Openings are not consulted on purpose: a door or a window is cut into a
-+   * wall but never interrupts it, so it cannot break a room.
-+   */
-+  private boundaryWalls(): WallMesh[] {
-+    return [...this.wallTool.walls].filter(
-+      (wall) => !wall.isPreview && wall.isRoomBoundary,
-+    );
-+  }
-+
-+  private static layoutSignatureOf(walls: readonly WallMesh[]): string {
-+    const parts = walls.map((wall) => {
-+      const values = [
-+        wall.startPoint.x,
-+        wall.startPoint.z,
-+        wall.endPoint.x,
-+        wall.endPoint.z,
-+        wall.width,
-+      ];
-+
-+      return values.map((value) => Math.round(value * 1000)).join(',');
-+    });
-+
-+    parts.sort();
-+
-+    return parts.join(';');
-+  }
-+
-+  /**
-+   * Recomputes the rooms when needed.
-+   *
-+   * The wall tool also notifies on hover and selection changes, so the cheap
-+   * layout fingerprint keeps those from triggering a rebuild.
-+   */
-+  refresh(force = false): void {
-+    const walls = this.boundaryWalls();
-+    const signature = RoomComponent.layoutSignatureOf(walls);
-+
-+    if (!force && signature === this.layoutSignature) {
-+      return;
-+    }
-+
-+    this.layoutSignature = signature;
-+
-+    const detected = detectRooms(walls);
-+
-+    // Left to right, then front to back, so the numbering is predictable.
-+    detected.sort(
-+      (a, b) => a.bounds.minX - b.bounds.minX || a.bounds.minZ - b.bounds.minZ,
-+    );
-+
-+    const rooms: RoomInfo[] = [];
-+    const keep = new Set<string>();
-+
-+    detected.forEach((room, index) => {
-+      let id = room.id;
-+      let suffix = 1;
-+
-+      // Two faces can only share a fingerprint in degenerate layouts, but the
-+      // scene objects are keyed by id so it still has to be unique.
-+      while (keep.has(id)) {
-+        suffix += 1;
-+        id = `${room.id}#${suffix}`;
-+      }
-+
-+      keep.add(id);
-+
-+      const name = `Room ${index + 1}`;
-+      const options = {
-+        polygon: room.polygon,
-+        name,
-+        area: room.area,
-+        center: room.center,
-+      };
-+
-+      const existing = this.meshes.get(id);
-+
-+      if (existing) {
-+        existing.update(options);
-+      } else {
-+        const mesh = new RoomMesh(id, options);
-+        this.meshes.set(id, mesh);
-+        this.world.scene.add(mesh);
-+      }
-+
-+      rooms.push({
-+        id,
-+        name,
-+        area: room.area,
-+        perimeter: room.perimeter,
-+        center: room.center,
-+        bounds: room.bounds,
-+        walls: room.walls,
-+      });
-+    });
-+
-+    for (const [id, mesh] of [...this.meshes]) {
-+      if (keep.has(id)) continue;
-+
-+      this.meshes.delete(id);
-+      this.world.scene.remove(mesh);
-+      mesh.dispose();
-+    }
-+
-+    this.rooms = rooms;
-+
-+    this.applyVisibility();
-+    this.notify();
-+  }
-+
-+  private applyVisibility(): void {
-+    for (const mesh of this.meshes.values()) {
-+      mesh.setFloorVisible(this.showFloors);
-+      mesh.setLabelVisible(this.showLabels);
-+    }
-+  }
-+
-+  dispose(): void {
-+    this.unsubscribeWallTool?.();
-+    this.unsubscribeWallTool = undefined;
-+
-+    for (const mesh of this.meshes.values()) {
-+      this.world.scene.remove(mesh);
-+      mesh.dispose();
-+    }
-+
-+    this.meshes.clear();
-+    this.rooms = [];
-+    this.layoutSignature = '';
-+    this.listeners.clear();
-+  }
-+}
-diff --git a/src/objects/RoomMesh.ts b/src/objects/RoomMesh.ts
-new file mode 100644
-index 0000000..5ac0ba2
---- /dev/null
-+++ b/src/objects/RoomMesh.ts
-@@ -0,0 +1,248 @@
-+import * as THREE from 'three';
-+
-+import { BaseMesh } from './BaseMesh';
-+import type { RoomPoint } from '../types/Room';
-+
-+export interface RoomMeshOptions {
-+  polygon: readonly RoomPoint[];
-+  name: string;
-+  area: number;
-+  center: RoomPoint;
-+}
-+
-+/** Floor slab of a detected room, drawn just above the grid. */
-+const FLOOR_HEIGHT = 0.004;
-+
-+/** Outline offset above the slab, in the mesh's local frame. */
-+const OUTLINE_OFFSET = 0.004;
-+
-+/** How high the label floats above the floor. */
-+const LABEL_HEIGHT = 0.35;
-+
-+const LABEL_CANVAS_WIDTH = 512;
-+const LABEL_CANVAS_HEIGHT = 192;
-+const LABEL_MAX_WIDTH = 2.6;
-+const LABEL_MIN_WIDTH = 0.9;
-+
-+const FLOOR_COLOR = 0x38bdf8;
-+const OUTLINE_COLOR = 0x7dd3fc;
-+
-+/**
-+ * A room is derived data: it is created, updated and removed by
-+ * `RoomComponent` whenever the wall layout changes, and it is intentionally
-+ * not registered with `World.meshes` so it never interferes with picking
-+ * walls, doors or windows.
-+ *
-+ * The mesh is built in the XY plane and rotated onto the ground, so a room
-+ * point (x, z) becomes the local point (x, -z).
-+ */
-+export class RoomMesh extends BaseMesh {
-+  readonly roomId: string;
-+
-+  private outline: THREE.LineLoop<
-+    THREE.BufferGeometry,
-+    THREE.LineBasicMaterial
++  private shadowPlane?: THREE.Mesh<
++    THREE.PlaneGeometry,
++    THREE.ShadowMaterial
 +  >;
 +
-+  private label: THREE.Sprite;
-+  private labelTexture: THREE.CanvasTexture;
-+  private labelCanvas: HTMLCanvasElement;
-+  private labelText = '';
-+  private readonly floorMaterial: THREE.MeshStandardMaterial;
+   private highlight?: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+ 
+   private raycaster?: RaycastComponent;
+@@ -66,6 +71,8 @@ export class GridComponent extends Component {
+ 
+     this.createRaycastPlane();
+ 
++    this.createShadowPlane();
 +
-+  constructor(roomId: string, options: RoomMeshOptions) {
-+    const material = new THREE.MeshStandardMaterial({
-+      color: FLOOR_COLOR,
-+      transparent: true,
-+      opacity: 0.18,
-+      roughness: 1,
-+      metalness: 0,
-+      side: THREE.DoubleSide,
+     this.createHighlight();
+ 
+     const canvas = this.world.renderer.domElement;
+@@ -172,6 +179,14 @@ export class GridComponent extends Component {
+       this.raycastPlane.material.dispose();
+     }
+ 
++    if (this.shadowPlane) {
++      this.world.scene.remove(this.shadowPlane);
++
++      this.shadowPlane.geometry.dispose();
++
++      this.shadowPlane.material.dispose();
++    }
++
+     if (this.highlight) {
+       this.world.scene.remove(this.highlight);
+ 
+@@ -183,6 +198,7 @@ export class GridComponent extends Component {
+     this.grid = undefined;
+     this.axes = undefined;
+     this.raycastPlane = undefined;
++    this.shadowPlane = undefined;
+     this.highlight = undefined;
+   }
+ 
+@@ -219,6 +235,22 @@ export class GridComponent extends Component {
+     this.world.scene.add(this.raycastPlane);
+   }
+ 
++  private createShadowPlane(): void {
++    const geometry = new THREE.PlaneGeometry(this.size * 2, this.size * 2);
++
++    const material = new THREE.ShadowMaterial({
++      opacity: 0.35,
 +      depthWrite: false,
 +    });
 +
-+    super(RoomMesh.createGeometry(options.polygon), material);
++    this.shadowPlane = new THREE.Mesh(geometry, material);
++    this.shadowPlane.rotation.x = -Math.PI / 2;
++    this.shadowPlane.position.y = -0.001;
++    this.shadowPlane.receiveShadow = true;
 +
-+    this.roomId = roomId;
-+    this.floorMaterial = material;
-+
-+    this.rotation.x = -Math.PI / 2;
-+    this.position.y = FLOOR_HEIGHT;
-+    this.renderOrder = 1;
-+
-+    this.outline = new THREE.LineLoop(
-+      RoomMesh.createOutlineGeometry(options.polygon),
-+      new THREE.LineBasicMaterial({
-+        color: OUTLINE_COLOR,
-+        transparent: true,
-+        opacity: 0.9,
-+      }),
-+    );
-+    this.outline.renderOrder = 2;
-+    this.add(this.outline);
-+
-+    this.labelCanvas = document.createElement('canvas');
-+    this.labelCanvas.width = LABEL_CANVAS_WIDTH;
-+    this.labelCanvas.height = LABEL_CANVAS_HEIGHT;
-+
-+    this.labelTexture = new THREE.CanvasTexture(this.labelCanvas);
-+    this.labelTexture.colorSpace = THREE.SRGBColorSpace;
-+
-+    this.label = new THREE.Sprite(
-+      new THREE.SpriteMaterial({
-+        map: this.labelTexture,
-+        transparent: true,
-+        depthTest: false,
-+        depthWrite: false,
-+      }),
-+    );
-+    this.label.renderOrder = 1000;
-+    this.add(this.label);
-+
-+    this.applyLabel(options);
++    this.world.scene.add(this.shadowPlane);
 +  }
 +
-+  /**
-+   * Re-uses the same scene object when a room only changed shape or size.
-+   */
-+  update(options: RoomMeshOptions): void {
-+    this.geometry.dispose();
-+    this.geometry = RoomMesh.createGeometry(options.polygon);
-+
-+    this.outline.geometry.dispose();
-+    this.outline.geometry = RoomMesh.createOutlineGeometry(options.polygon);
-+
-+    this.applyLabel(options);
+   private createHighlight(): void {
+     const geometry = new THREE.PlaneGeometry(this.cellSize, this.cellSize);
+ 
+diff --git a/src/components/WallToolComponent.ts b/src/components/WallToolComponent.ts
+index 3405581..9044ce4 100644
+--- a/src/components/WallToolComponent.ts
++++ b/src/components/WallToolComponent.ts
+@@ -4,6 +4,8 @@ import { GridComponent } from './GridComponent';
+ import { RaycastComponent } from './RaycastComponent';
+ import { WallMesh } from '../objects/WallMesh';
+ import { Opening } from '../objects/openings/Opening';
++import { WindowMesh } from '../objects/openings/WindowMesh';
++import { DoorMesh } from '../objects/openings/DoorMesh';
+ import {
+   createDefaultOpeningParams,
+   createOpening,
+@@ -121,7 +123,9 @@ export class WallToolComponent extends Component {
+   > | null = null;
+ 
+   private ambientLight?: THREE.AmbientLight;
++  private hemiLight?: THREE.HemisphereLight;
+   private directionalLight?: THREE.DirectionalLight;
++  private fillLight?: THREE.DirectionalLight;
+ 
+   private readonly listeners = new Set<() => void>();
+ 
+@@ -198,6 +202,21 @@ export class WallToolComponent extends Component {
+   // Wall properties
+   // --------------------------------
+ 
++  setSelectedWallMaterial(material: THREE.Material, materialId?: string): void {
++    if (this.selectedWall) {
++      this.selectedWall.setPreviewMaterial(null);
++      this.selectedWall.setCustomMaterial(material, materialId);
++      this.notify();
++    }
 +  }
 +
-+  /**
-+   * Hides the slab and its outline while keeping the object itself in the
-+   * scene graph, so the label can still be shown on its own.
-+   */
-+  setFloorVisible(visible: boolean): void {
-+    this.floorMaterial.visible = visible;
-+    this.outline.visible = visible;
++  previewWallMaterial(material: THREE.Material | null): void {
++    if (this.selectedWall) {
++      this.selectedWall.setPreviewMaterial(material);
++      this.notify();
++    }
 +  }
 +
-+  setLabelVisible(visible: boolean): void {
-+    this.label.visible = visible;
+   setSelectedWallHeight(height: number): void {
+     if (this.selectedWall && height > 0) {
+       this.selectedWall.setHeight(height);
+@@ -252,6 +271,43 @@ export class WallToolComponent extends Component {
+   // Opening properties
+   // --------------------------------
+ 
++  setSelectedOpeningGlassMaterial(material: THREE.Material, materialId?: string): void {
++    if (this.selectedOpening instanceof WindowMesh) {
++      this.selectedOpening.setPreviewMaterial(null);
++      this.selectedOpening.setGlassMaterial(material, materialId);
++      this.notify();
++    }
 +  }
 +
-+  // --------------------------------
-+  // Geometry
-+  // --------------------------------
++  previewOpeningGlassMaterial(material: THREE.Material | null): void {
++    if (this.selectedOpening instanceof WindowMesh) {
++      this.selectedOpening.setPreviewMaterial(material);
++      this.notify();
++    }
++  }
 +
-+  private static createGeometry(
-+    polygon: readonly RoomPoint[],
-+  ): THREE.BufferGeometry {
-+    if (polygon.length < 3) {
-+      return new THREE.BufferGeometry();
++  setSelectedOpeningLeafMaterial(material: THREE.Material, materialId?: string): void {
++    if (this.selectedOpening instanceof DoorMesh) {
++      this.selectedOpening.setPreviewMaterial(null);
++      this.selectedOpening.setLeafMaterial(material, materialId);
++      this.notify();
++    }
++  }
++
++  previewOpeningLeafMaterial(material: THREE.Material | null): void {
++    if (this.selectedOpening instanceof DoorMesh) {
++      this.selectedOpening.setPreviewMaterial(material);
++      this.notify();
++    }
++  }
++
++  setSelectedOpeningFrameMaterial(material: THREE.Material, materialId?: string): void {
++    if (this.selectedOpening instanceof WindowMesh || this.selectedOpening instanceof DoorMesh) {
++      this.selectedOpening.setFrameMaterial(material, materialId);
++      this.notify();
++    }
++  }
++
+   setSelectedOpeningWidth(width: number): void {
+     this.updateSelectedOpening({ width });
+   }
+@@ -354,12 +410,32 @@ export class WallToolComponent extends Component {
+     });
+ 
+     if (!hasLight) {
+-      this.ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+-      this.directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+-      this.directionalLight.position.set(10, 20, 15);
+-
++      this.hemiLight = new THREE.HemisphereLight(0xe0f2fe, 0x1e293b, 0.65);
++      this.hemiLight.position.set(0, 50, 0);
++
++      this.ambientLight = new THREE.AmbientLight(0xffffff, 0.35);
++
++      this.directionalLight = new THREE.DirectionalLight(0xfffaed, 1.5);
++      this.directionalLight.position.set(25, 35, 20);
++      this.directionalLight.castShadow = true;
++      this.directionalLight.shadow.mapSize.width = 2048;
++      this.directionalLight.shadow.mapSize.height = 2048;
++      this.directionalLight.shadow.camera.near = 0.5;
++      this.directionalLight.shadow.camera.far = 150;
++      this.directionalLight.shadow.camera.left = -40;
++      this.directionalLight.shadow.camera.right = 40;
++      this.directionalLight.shadow.camera.top = 40;
++      this.directionalLight.shadow.camera.bottom = -40;
++      this.directionalLight.shadow.bias = -0.0001;
++      this.directionalLight.shadow.normalBias = 0.02;
++
++      this.fillLight = new THREE.DirectionalLight(0x94a3b8, 0.45);
++      this.fillLight.position.set(-20, 15, -15);
++
++      this.world.scene.add(this.hemiLight);
+       this.world.scene.add(this.ambientLight);
+       this.world.scene.add(this.directionalLight);
++      this.world.scene.add(this.fillLight);
+     }
+   }
+ 
+@@ -1179,6 +1255,11 @@ export class WallToolComponent extends Component {
+     }
+     this.walls.clear();
+ 
++    if (this.hemiLight) {
++      this.world.scene.remove(this.hemiLight);
++      this.hemiLight.dispose();
 +    }
 +
-+    const shape = new THREE.Shape();
-+
-+    shape.moveTo(polygon[0].x, -polygon[0].z);
-+
-+    for (let i = 1; i < polygon.length; i++) {
-+      shape.lineTo(polygon[i].x, -polygon[i].z);
+     if (this.ambientLight) {
+       this.world.scene.remove(this.ambientLight);
+       this.ambientLight.dispose();
+@@ -1189,6 +1270,11 @@ export class WallToolComponent extends Component {
+       this.directionalLight.dispose();
+     }
+ 
++    if (this.fillLight) {
++      this.world.scene.remove(this.fillLight);
++      this.fillLight.dispose();
 +    }
 +
-+    shape.closePath();
+     this.listeners.clear();
+   }
+ }
+diff --git a/src/engine/World.ts b/src/engine/World.ts
+index dc5a17a..08a1b15 100644
+--- a/src/engine/World.ts
++++ b/src/engine/World.ts
+@@ -68,8 +68,14 @@ export class World {
+ 
+     this.renderer = new THREE.WebGLRenderer({
+       antialias: true,
++      powerPreference: 'high-performance',
+     });
+ 
++    this.renderer.shadowMap.enabled = true;
++    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
++    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
++    this.renderer.toneMappingExposure = 1.15;
 +
-+    return new THREE.ShapeGeometry(shape);
+     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+ 
+     this.renderer.setSize(width, height);
+diff --git a/src/materials/materialLibrary.ts b/src/materials/materialLibrary.ts
+new file mode 100644
+index 0000000..c002d94
+--- /dev/null
++++ b/src/materials/materialLibrary.ts
+@@ -0,0 +1,296 @@
++import * as THREE from 'three';
++import {
++  getBrickTexture,
++  getConcreteTexture,
++  getMarbleTexture,
++  getPlasterTexture,
++  getSlateTexture,
++  getTileTexture,
++  getWoodTexture,
++} from './proceduralTextures';
++
++export type MaterialCategory = 'wall' | 'glass' | 'wood' | 'metal' | 'concrete' | 'tiles' | 'custom';
++
++export interface MaterialDefinition {
++  id: string;
++  name: string;
++  category: MaterialCategory;
++  material: THREE.Material;
++  isGlass?: boolean;
++  description?: string;
++}
++
++let libraryInitialized = false;
++const materialRegistry = new Map<string, MaterialDefinition>();
++
++/**
++ * Creates photorealistic glass materials using MeshPhysicalMaterial.
++ * These respond to lighting, reflections, transmission and specular highlights.
++ */
++export function createPhysicalGlassMaterial(options: {
++  color?: THREE.ColorRepresentation;
++  transmission?: number;
++  roughness?: number;
++  ior?: number;
++  thickness?: number;
++  opacity?: number;
++  reflectivity?: number;
++}): THREE.MeshPhysicalMaterial {
++  return new THREE.MeshPhysicalMaterial({
++    color: options.color ?? 0xffffff,
++    transparent: true,
++    opacity: options.opacity ?? 1.0,
++    transmission: options.transmission ?? 0.94,
++    roughness: options.roughness ?? 0.04,
++    metalness: 0.0,
++    ior: options.ior ?? 1.52, // Standard soda-lime architectural glass
++    thickness: options.thickness ?? 0.05,
++    specularIntensity: 1.0,
++    specularColor: new THREE.Color(0xffffff),
++    clearcoat: 1.0,
++    clearcoatRoughness: 0.02,
++    side: THREE.DoubleSide,
++    depthWrite: false,
++    shadowSide: THREE.DoubleSide,
++  });
++}
++
++function initBuiltinMaterials(): void {
++  if (libraryInitialized) return;
++  libraryInitialized = true;
++
++  // ----------------------------------------------------
++  // Glass Materials (For Windows)
++  // ----------------------------------------------------
++  const glassClear = createPhysicalGlassMaterial({
++    color: 0xffffff,
++    transmission: 0.95,
++    roughness: 0.03,
++    ior: 1.52,
++    thickness: 0.04,
++  });
++
++  const glassFrosted = createPhysicalGlassMaterial({
++    color: 0xf1f5f9,
++    transmission: 0.82,
++    roughness: 0.42,
++    ior: 1.45,
++    thickness: 0.08,
++  });
++
++  const glassBlueTint = createPhysicalGlassMaterial({
++    color: 0x93c5fd,
++    transmission: 0.90,
++    roughness: 0.05,
++    ior: 1.52,
++    thickness: 0.05,
++  });
++
++  const glassSmoked = createPhysicalGlassMaterial({
++    color: 0x475569,
++    transmission: 0.72,
++    roughness: 0.06,
++    ior: 1.54,
++    thickness: 0.06,
++  });
++
++  const glassEmerald = createPhysicalGlassMaterial({
++    color: 0x6ee7b7,
++    transmission: 0.88,
++    roughness: 0.04,
++    ior: 1.52,
++    thickness: 0.05,
++  });
++
++  const glassAmber = createPhysicalGlassMaterial({
++    color: 0xfcd34d,
++    transmission: 0.85,
++    roughness: 0.05,
++    ior: 1.52,
++    thickness: 0.05,
++  });
++
++  // ----------------------------------------------------
++  // Wall Materials
++  // ----------------------------------------------------
++  const matPlaster = new THREE.MeshStandardMaterial({
++    map: getPlasterTexture(),
++    roughness: 0.85,
++    metalness: 0.02,
++  });
++
++  const matConcrete = new THREE.MeshStandardMaterial({
++    map: getConcreteTexture(),
++    roughness: 0.92,
++    metalness: 0.05,
++  });
++
++  const matBrick = new THREE.MeshStandardMaterial({
++    map: getBrickTexture(),
++    roughness: 0.78,
++    metalness: 0.04,
++  });
++
++  const matOak = new THREE.MeshStandardMaterial({
++    map: getWoodTexture(false),
++    roughness: 0.55,
++    metalness: 0.02,
++  });
++
++  const matWalnut = new THREE.MeshStandardMaterial({
++    map: getWoodTexture(true),
++    roughness: 0.45,
++    metalness: 0.02,
++  });
++
++  const matTile = new THREE.MeshStandardMaterial({
++    map: getTileTexture(),
++    roughness: 0.18,
++    metalness: 0.08,
++  });
++
++  const matMarble = new THREE.MeshStandardMaterial({
++    map: getMarbleTexture(),
++    roughness: 0.22,
++    metalness: 0.05,
++  });
++
++  const matSlate = new THREE.MeshStandardMaterial({
++    map: getSlateTexture(),
++    roughness: 0.65,
++    metalness: 0.15,
++  });
++
++  const matStucco = new THREE.MeshStandardMaterial({
++    color: 0xdfd7c9,
++    map: getPlasterTexture(),
++    roughness: 0.9,
++    metalness: 0.0,
++  });
++
++  // ----------------------------------------------------
++  // Metal & Finish Materials
++  // ----------------------------------------------------
++  const matAluminum = new THREE.MeshStandardMaterial({
++    color: 0xd6d3d1,
++    roughness: 0.35,
++    metalness: 0.85,
++  });
++
++  const matDarkSteel = new THREE.MeshStandardMaterial({
++    color: 0x334155,
++    roughness: 0.4,
++    metalness: 0.75,
++  });
++
++  const matBrass = new THREE.MeshStandardMaterial({
++    color: 0xf59e0b,
++    roughness: 0.25,
++    metalness: 0.85,
++  });
++
++  const matWhitePainted = new THREE.MeshStandardMaterial({
++    color: 0xf8fafc,
++    roughness: 0.35,
++    metalness: 0.05,
++  });
++
++  const list: MaterialDefinition[] = [
++    // Wall Presets
++    { id: 'wall-plaster', name: 'White Plaster', category: 'wall', material: matPlaster, description: 'Smooth matte architectural plaster' },
++    { id: 'wall-concrete', name: 'Raw Concrete', category: 'concrete', material: matConcrete, description: 'Industrial architectural concrete' },
++    { id: 'wall-brick', name: 'Red Brick', category: 'wall', material: matBrick, description: 'Traditional exposed brick masonry' },
++    { id: 'wall-oak', name: 'Oak Wood Panels', category: 'wood', material: matOak, description: 'Warm natural timber siding' },
++    { id: 'wall-walnut', name: 'Dark Walnut', category: 'wood', material: matWalnut, description: 'Rich dark luxury hardwood' },
++    { id: 'wall-tiles', name: 'Ceramic Subway Tiles', category: 'tiles', material: matTile, description: 'Glossy ceramic wall tiles' },
++    { id: 'wall-marble', name: 'Carrara Marble', category: 'wall', material: matMarble, description: 'Polished white Italian marble' },
++    { id: 'wall-slate', name: 'Charcoal Slate', category: 'wall', material: matSlate, description: 'Modern dark architectural slate' },
++    { id: 'wall-stucco', name: 'Warm Stucco', category: 'wall', material: matStucco, description: 'Textured mediterranean stucco' },
++
++    // Glass Presets
++    { id: 'glass-clear', name: 'Clear Glass', category: 'glass', material: glassClear, isGlass: true, description: 'Ultra-clear physical architectural glass' },
++    { id: 'glass-frosted', name: 'Frosted Glass', category: 'glass', material: glassFrosted, isGlass: true, description: 'Translucent diffused privacy glass' },
++    { id: 'glass-blue', name: 'Solar Blue Glass', category: 'glass', material: glassBlueTint, isGlass: true, description: 'Light blue solar reflective glass' },
++    { id: 'glass-smoked', name: 'Smoked Charcoal Glass', category: 'glass', material: glassSmoked, isGlass: true, description: 'Dark tinted modern glass' },
++    { id: 'glass-emerald', name: 'Emerald Glass', category: 'glass', material: glassEmerald, isGlass: true, description: 'Architectural subtle green tint glass' },
++    { id: 'glass-amber', name: 'Amber Glass', category: 'glass', material: glassAmber, isGlass: true, description: 'Warm amber decorative glass' },
++
++    // Metal & Trim
++    { id: 'metal-aluminum', name: 'Brushed Aluminum', category: 'metal', material: matAluminum, description: 'Satin anodized aluminum' },
++    { id: 'metal-dark-steel', name: 'Matte Dark Steel', category: 'metal', material: matDarkSteel, description: 'Dark architectural steel' },
++    { id: 'metal-brass', name: 'Polished Brass', category: 'metal', material: matBrass, description: 'Reflective gold brass' },
++    { id: 'trim-white', name: 'Painted White', category: 'wood', material: matWhitePainted, description: 'Clean satin painted finish' },
++  ];
++
++  for (const def of list) {
++    materialRegistry.set(def.id, def);
++  }
++}
++
++export function getAllMaterials(): MaterialDefinition[] {
++  initBuiltinMaterials();
++  return Array.from(materialRegistry.values());
++}
++
++export function getMaterialsByCategory(category: MaterialCategory | 'all'): MaterialDefinition[] {
++  const all = getAllMaterials();
++  if (category === 'all') return all;
++  return all.filter((item) => item.category === category);
++}
++
++export function getMaterialById(id: string): MaterialDefinition | undefined {
++  initBuiltinMaterials();
++  return materialRegistry.get(id);
++}
++
++export function registerCustomMaterial(def: MaterialDefinition): void {
++  initBuiltinMaterials();
++  materialRegistry.set(def.id, def);
++}
++
++/**
++ * Creates a custom material from an uploaded image file.
++ */
++export async function createMaterialFromImageFile(
++  file: File,
++  options: { roughness?: number; metalness?: number; name?: string } = {},
++): Promise<MaterialDefinition> {
++  return new Promise((resolve, reject) => {
++    const reader = new FileReader();
++    reader.onload = () => {
++      const img = new Image();
++      img.onload = () => {
++        const texture = new THREE.Texture(img);
++        texture.wrapS = THREE.RepeatWrapping;
++        texture.wrapT = THREE.RepeatWrapping;
++        texture.repeat.set(1.5, 1.5);
++        texture.colorSpace = THREE.SRGBColorSpace;
++        texture.needsUpdate = true;
++
++        const material = new THREE.MeshStandardMaterial({
++          map: texture,
++          roughness: options.roughness ?? 0.6,
++          metalness: options.metalness ?? 0.05,
++        });
++
++        const id = `custom-${crypto.randomUUID()}`;
++        const name = options.name || file.name.replace(/\.[^/.]+$/, '');
++
++        const def: MaterialDefinition = {
++          id,
++          name,
++          category: 'custom',
++          material,
++          description: `Custom image texture (${file.name})`,
++        };
++
++        registerCustomMaterial(def);
++        resolve(def);
++      };
++      img.onerror = () => reject(new Error('Failed to load image texture.'));
++      img.src = reader.result as string;
++    };
++    reader.onerror = () => reject(new Error('Failed to read file.'));
++    reader.readAsDataURL(file);
++  });
++}
+diff --git a/src/materials/proceduralTextures.ts b/src/materials/proceduralTextures.ts
+new file mode 100644
+index 0000000..aa5c908
+--- /dev/null
++++ b/src/materials/proceduralTextures.ts
+@@ -0,0 +1,333 @@
++import * as THREE from 'three';
++
++/**
++ * Generates procedural textures using HTML5 Canvas.
++ * This guarantees photorealistic PBR maps without relying on external network requests.
++ */
++
++const textureCache = new Map<string, THREE.CanvasTexture>();
++
++function createNoise(ctx: CanvasRenderingContext2D, width: number, height: number, opacity: number): void {
++  const imgData = ctx.getImageData(0, 0, width, height);
++  const data = imgData.data;
++  for (let i = 0; i < data.length; i += 4) {
++    const noise = (Math.random() - 0.5) * opacity * 255;
++    data[i] = Math.min(255, Math.max(0, data[i] + noise));
++    data[i + 1] = Math.min(255, Math.max(0, data[i + 1] + noise));
++    data[i + 2] = Math.min(255, Math.max(0, data[i + 2] + noise));
++  }
++  ctx.putImageData(imgData, 0, 0);
++}
++
++export function getPlasterTexture(): THREE.CanvasTexture {
++  const key = 'plaster_diffuse';
++  if (textureCache.has(key)) return textureCache.get(key)!;
++
++  const canvas = document.createElement('canvas');
++  canvas.width = 512;
++  canvas.height = 512;
++  const ctx = canvas.getContext('2d')!;
++
++  ctx.fillStyle = '#f1f1ee';
++  ctx.fillRect(0, 0, 512, 512);
++
++  // Subtle plaster stipples
++  for (let i = 0; i < 4000; i++) {
++    const x = Math.random() * 512;
++    const y = Math.random() * 512;
++    const r = Math.random() * 2 + 0.5;
++    const shade = Math.random() > 0.5 ? 250 : 230;
++    ctx.fillStyle = `rgba(${shade}, ${shade}, ${shade - 5}, 0.3)`;
++    ctx.beginPath();
++    ctx.arc(x, y, r, 0, Math.PI * 2);
++    ctx.fill();
++  }
++  createNoise(ctx, 512, 512, 0.04);
++
++  const texture = new THREE.CanvasTexture(canvas);
++  texture.wrapS = THREE.RepeatWrapping;
++  texture.wrapT = THREE.RepeatWrapping;
++  texture.repeat.set(2, 2);
++  texture.colorSpace = THREE.SRGBColorSpace;
++  textureCache.set(key, texture);
++  return texture;
++}
++
++export function getConcreteTexture(): THREE.CanvasTexture {
++  const key = 'concrete_diffuse';
++  if (textureCache.has(key)) return textureCache.get(key)!;
++
++  const canvas = document.createElement('canvas');
++  canvas.width = 512;
++  canvas.height = 512;
++  const ctx = canvas.getContext('2d')!;
++
++  ctx.fillStyle = '#9e9e9e';
++  ctx.fillRect(0, 0, 512, 512);
++
++  // Concrete clouds and mottled patches
++  for (let i = 0; i < 30; i++) {
++    const x = Math.random() * 512;
++    const y = Math.random() * 512;
++    const radius = Math.random() * 120 + 40;
++    const gradient = ctx.createRadialGradient(x, y, 5, x, y, radius);
++    const val = Math.floor(Math.random() * 50 + 130);
++    gradient.addColorStop(0, `rgba(${val}, ${val}, ${val}, 0.25)`);
++    gradient.addColorStop(1, 'rgba(150, 150, 150, 0)');
++    ctx.fillStyle = gradient;
++    ctx.beginPath();
++    ctx.arc(x, y, radius, 0, Math.PI * 2);
++    ctx.fill();
 +  }
 +
-+  private static createOutlineGeometry(
-+    polygon: readonly RoomPoint[],
-+  ): THREE.BufferGeometry {
-+    const points = polygon.map(
-+      (point) => new THREE.Vector3(point.x, -point.z, OUTLINE_OFFSET),
-+    );
-+
-+    return new THREE.BufferGeometry().setFromPoints(points);
++  // Micro pinholes
++  for (let i = 0; i < 800; i++) {
++    const x = Math.random() * 512;
++    const y = Math.random() * 512;
++    ctx.fillStyle = 'rgba(70, 70, 70, 0.4)';
++    ctx.fillRect(x, y, Math.random() * 2 + 1, Math.random() * 2 + 1);
 +  }
 +
-+  // --------------------------------
-+  // Label
-+  // --------------------------------
++  createNoise(ctx, 512, 512, 0.08);
 +
-+  private applyLabel(options: RoomMeshOptions): void {
-+    const text = `${options.name}\n${options.area.toFixed(2)} m²`;
++  const texture = new THREE.CanvasTexture(canvas);
++  texture.wrapS = THREE.RepeatWrapping;
++  texture.wrapT = THREE.RepeatWrapping;
++  texture.repeat.set(1.5, 1.5);
++  texture.colorSpace = THREE.SRGBColorSpace;
++  textureCache.set(key, texture);
++  return texture;
++}
 +
-+    if (text !== this.labelText) {
-+      this.labelText = text;
-+      this.drawLabel(options.name, `${options.area.toFixed(2)} m²`);
++export function getBrickTexture(): THREE.CanvasTexture {
++  const key = 'brick_diffuse';
++  if (textureCache.has(key)) return textureCache.get(key)!;
++
++  const canvas = document.createElement('canvas');
++  canvas.width = 512;
++  canvas.height = 512;
++  const ctx = canvas.getContext('2d')!;
++
++  // Mortar background
++  ctx.fillStyle = '#dcd5ca';
++  ctx.fillRect(0, 0, 512, 512);
++
++  const brickW = 64;
++  const brickH = 26;
++  const mortar = 4;
++  const rows = Math.ceil(512 / (brickH + mortar));
++  const cols = Math.ceil(512 / (brickW + mortar)) + 1;
++
++  for (let r = 0; r < rows; r++) {
++    const offsetX = (r % 2) * (brickW / 2 + mortar / 2);
++    for (let c = -1; c < cols; c++) {
++      const x = c * (brickW + mortar) + offsetX;
++      const y = r * (brickH + mortar);
++
++      // Brick color variations
++      const red = Math.floor(160 + Math.random() * 40);
++      const green = Math.floor(55 + Math.random() * 25);
++      const blue = Math.floor(40 + Math.random() * 20);
++
++      ctx.fillStyle = `rgb(${red}, ${green}, ${blue})`;
++      ctx.fillRect(x, y, brickW, brickH);
++
++      // Subtle brick edge highlight and texture
++      ctx.fillStyle = 'rgba(0, 0, 0, 0.12)';
++      ctx.fillRect(x, y + brickH - 2, brickW, 2);
++      ctx.fillRect(x + brickW - 2, y, 2, brickH);
++
++      ctx.fillStyle = 'rgba(255, 255, 255, 0.08)';
++      ctx.fillRect(x, y, brickW, 2);
++      ctx.fillRect(x, y, 2, brickH);
++    }
++  }
++
++  createNoise(ctx, 512, 512, 0.07);
++
++  const texture = new THREE.CanvasTexture(canvas);
++  texture.wrapS = THREE.RepeatWrapping;
++  texture.wrapT = THREE.RepeatWrapping;
++  texture.repeat.set(2, 2);
++  texture.colorSpace = THREE.SRGBColorSpace;
++  textureCache.set(key, texture);
++  return texture;
++}
++
++export function getWoodTexture(isDark = false): THREE.CanvasTexture {
++  const key = `wood_diffuse_${isDark ? 'dark' : 'light'}`;
++  if (textureCache.has(key)) return textureCache.get(key)!;
++
++  const canvas = document.createElement('canvas');
++  canvas.width = 512;
++  canvas.height = 512;
++  const ctx = canvas.getContext('2d')!;
++
++  const baseColor = isDark ? '#4a2e1b' : '#c8965d';
++  ctx.fillStyle = baseColor;
++  ctx.fillRect(0, 0, 512, 512);
++
++  // Planks
++  const plankH = 64;
++  for (let y = 0; y < 512; y += plankH) {
++    // Plank line
++    ctx.fillStyle = 'rgba(20, 10, 5, 0.35)';
++    ctx.fillRect(0, y, 512, 2);
++
++    // Wood grain lines along each plank
++    for (let i = 0; i < 35; i++) {
++      const lineY = y + Math.random() * plankH;
++      const alpha = Math.random() * 0.2 + 0.05;
++      ctx.strokeStyle = isDark
++        ? `rgba(20, 10, 5, ${alpha})`
++        : `rgba(110, 60, 20, ${alpha})`;
++      ctx.lineWidth = Math.random() * 2 + 0.5;
++      ctx.beginPath();
++      ctx.moveTo(0, lineY);
++      ctx.bezierCurveTo(
++        150,
++        lineY + (Math.random() - 0.5) * 6,
++        350,
++        lineY + (Math.random() - 0.5) * 6,
++        512,
++        lineY,
++      );
++      ctx.stroke();
++    }
++  }
++
++  createNoise(ctx, 512, 512, 0.05);
++
++  const texture = new THREE.CanvasTexture(canvas);
++  texture.wrapS = THREE.RepeatWrapping;
++  texture.wrapT = THREE.RepeatWrapping;
++  texture.repeat.set(1.5, 1.5);
++  texture.colorSpace = THREE.SRGBColorSpace;
++  textureCache.set(key, texture);
++  return texture;
++}
++
++export function getTileTexture(): THREE.CanvasTexture {
++  const key = 'tile_diffuse';
++  if (textureCache.has(key)) return textureCache.get(key)!;
++
++  const canvas = document.createElement('canvas');
++  canvas.width = 512;
++  canvas.height = 512;
++  const ctx = canvas.getContext('2d')!;
++
++  ctx.fillStyle = '#cbd5e1'; // Grout color
++  ctx.fillRect(0, 0, 512, 512);
++
++  const tileSize = 64;
++  const grout = 3;
++
++  for (let x = 0; x < 512; x += tileSize) {
++    for (let y = 0; y < 512; y += tileSize) {
++      const shade = 245 + Math.floor(Math.random() * 10);
++      ctx.fillStyle = `rgb(${shade}, ${shade}, ${shade})`;
++      ctx.fillRect(x + grout, y + grout, tileSize - grout * 2, tileSize - grout * 2);
++
++      // Bevel highlight
++      ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
++      ctx.fillRect(x + grout, y + grout, tileSize - grout * 2, 2);
++      ctx.fillRect(x + grout, y + grout, 2, tileSize - grout * 2);
++
++      // Bevel shadow
++      ctx.fillStyle = 'rgba(0, 0, 0, 0.08)';
++      ctx.fillRect(x + grout, y + tileSize - grout - 2, tileSize - grout * 2, 2);
++      ctx.fillRect(x + tileSize - grout - 2, y + grout, 2, tileSize - grout * 2);
++    }
++  }
++
++  createNoise(ctx, 512, 512, 0.02);
++
++  const texture = new THREE.CanvasTexture(canvas);
++  texture.wrapS = THREE.RepeatWrapping;
++  texture.wrapT = THREE.RepeatWrapping;
++  texture.repeat.set(2, 2);
++  texture.colorSpace = THREE.SRGBColorSpace;
++  textureCache.set(key, texture);
++  return texture;
++}
++
++export function getMarbleTexture(): THREE.CanvasTexture {
++  const key = 'marble_diffuse';
++  if (textureCache.has(key)) return textureCache.get(key)!;
++
++  const canvas = document.createElement('canvas');
++  canvas.width = 512;
++  canvas.height = 512;
++  const ctx = canvas.getContext('2d')!;
++
++  ctx.fillStyle = '#f8fafc';
++  ctx.fillRect(0, 0, 512, 512);
++
++  // Marble veining
++  for (let v = 0; v < 6; v++) {
++    let startX = Math.random() * 512;
++    let startY = 0;
++    ctx.strokeStyle = 'rgba(148, 163, 184, 0.4)';
++    ctx.lineWidth = Math.random() * 3 + 1;
++    ctx.beginPath();
++    ctx.moveTo(startX, startY);
++
++    while (startY < 512) {
++      const nextX = startX + (Math.random() - 0.48) * 50;
++      const nextY = startY + Math.random() * 40 + 20;
++      ctx.lineTo(nextX, nextY);
++      startX = nextX;
++      startY = nextY;
++    }
++    ctx.stroke();
++  }
++
++  createNoise(ctx, 512, 512, 0.03);
++
++  const texture = new THREE.CanvasTexture(canvas);
++  texture.wrapS = THREE.RepeatWrapping;
++  texture.wrapT = THREE.RepeatWrapping;
++  texture.repeat.set(1.5, 1.5);
++  texture.colorSpace = THREE.SRGBColorSpace;
++  textureCache.set(key, texture);
++  return texture;
++}
++
++export function getSlateTexture(): THREE.CanvasTexture {
++  const key = 'slate_diffuse';
++  if (textureCache.has(key)) return textureCache.get(key)!;
++
++  const canvas = document.createElement('canvas');
++  canvas.width = 512;
++  canvas.height = 512;
++  const ctx = canvas.getContext('2d')!;
++
++  ctx.fillStyle = '#262d38';
++  ctx.fillRect(0, 0, 512, 512);
++
++  for (let i = 0; i < 40; i++) {
++    const x = Math.random() * 512;
++    const y = Math.random() * 512;
++    const w = Math.random() * 200 + 50;
++    const h = Math.random() * 8 + 2;
++    ctx.fillStyle = 'rgba(60, 75, 95, 0.3)';
++    ctx.fillRect(x, y, w, h);
++  }
++
++  createNoise(ctx, 512, 512, 0.08);
++
++  const texture = new THREE.CanvasTexture(canvas);
++  texture.wrapS = THREE.RepeatWrapping;
++  texture.wrapT = THREE.RepeatWrapping;
++  texture.repeat.set(2, 2);
++  texture.colorSpace = THREE.SRGBColorSpace;
++  textureCache.set(key, texture);
++  return texture;
++}
++
++export function disposeProceduralTextures(): void {
++  for (const texture of textureCache.values()) {
++    texture.dispose();
++  }
++  textureCache.clear();
++}
+diff --git a/src/materials/spherePreview.ts b/src/materials/spherePreview.ts
+new file mode 100644
+index 0000000..d9b39e5
+--- /dev/null
++++ b/src/materials/spherePreview.ts
+@@ -0,0 +1,108 @@
++import * as THREE from 'three';
++
++/**
++ * Unity-style Material Sphere Preview Renderer.
++ * Generates crisp 3D sphere thumbnails showing specular highlights, roughness,
++ * metalness, transparency, and procedural or uploaded textures.
++ */
++
++let previewRenderer: THREE.WebGLRenderer | null = null;
++let previewScene: THREE.Scene | null = null;
++let previewCamera: THREE.PerspectiveCamera | null = null;
++let previewSphere: THREE.Mesh<THREE.SphereGeometry, THREE.Material> | null = null;
++
++const previewCache = new Map<string, string>();
++
++function initPreviewEnvironment(): void {
++  if (previewRenderer) return;
++
++  const canvas = document.createElement('canvas');
++  canvas.width = 128;
++  canvas.height = 128;
++
++  previewRenderer = new THREE.WebGLRenderer({
++    canvas,
++    antialias: true,
++    alpha: true,
++    preserveDrawingBuffer: true,
++  });
++  previewRenderer.setSize(128, 128, false);
++  previewRenderer.setPixelRatio(1);
++  previewRenderer.toneMapping = THREE.ACESFilmicToneMapping;
++  previewRenderer.toneMappingExposure = 1.2;
++
++  previewScene = new THREE.Scene();
++
++  previewCamera = new THREE.PerspectiveCamera(40, 1, 0.1, 10);
++  previewCamera.position.set(0, 0, 3.0);
++  previewCamera.lookAt(0, 0, 0);
++
++  // Studio lighting setup (key, fill, rim, ambient)
++  const keyLight = new THREE.DirectionalLight(0xffffff, 2.2);
++  keyLight.position.set(3, 4, 3);
++  previewScene.add(keyLight);
++
++  const fillLight = new THREE.DirectionalLight(0x93c5fd, 0.9);
++  fillLight.position.set(-3, -1, 1.5);
++  previewScene.add(fillLight);
++
++  const rimLight = new THREE.DirectionalLight(0xffffff, 1.4);
++  rimLight.position.set(-2, 3, -3);
++  previewScene.add(rimLight);
++
++  const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
++  previewScene.add(ambientLight);
++
++  const geometry = new THREE.SphereGeometry(1, 32, 24);
++  const defaultMat = new THREE.MeshStandardMaterial({ color: 0xcccccc });
++  previewSphere = new THREE.Mesh(geometry, defaultMat);
++  previewScene.add(previewSphere);
++}
++
++/**
++ * Generates a Unity-style 3D sphere preview thumbnail as a Data URL for any Three.js Material.
++ */
++export function generateMaterialSpherePreview(materialId: string, material: THREE.Material): string {
++  if (previewCache.has(materialId)) {
++    return previewCache.get(materialId)!;
++  }
++
++  try {
++    initPreviewEnvironment();
++
++    if (!previewRenderer || !previewScene || !previewCamera || !previewSphere) {
++      return '';
 +    }
 +
-+    let minX = Infinity;
-+    let maxX = -Infinity;
-+    let minZ = Infinity;
-+    let maxZ = -Infinity;
++    previewSphere.material = material;
++    previewRenderer.render(previewScene, previewCamera);
 +
-+    for (const point of options.polygon) {
-+      minX = Math.min(minX, point.x);
-+      maxX = Math.max(maxX, point.x);
-+      minZ = Math.min(minZ, point.z);
-+      maxZ = Math.max(maxZ, point.z);
-+    }
++    const dataUrl = previewRenderer.domElement.toDataURL('image/png');
++    previewCache.set(materialId, dataUrl);
++    return dataUrl;
++  } catch {
++    return '';
++  }
++}
 +
-+    const fitted = Math.min(maxX - minX, maxZ - minZ) * 0.9;
-+    const width = THREE.MathUtils.clamp(
-+      Number.isFinite(fitted) ? fitted : LABEL_MAX_WIDTH,
-+      LABEL_MIN_WIDTH,
-+      LABEL_MAX_WIDTH,
-+    );
-+    const height = (width * LABEL_CANVAS_HEIGHT) / LABEL_CANVAS_WIDTH;
++/**
++ * Invalidate cache if a custom material's texture changes.
++ */
++export function invalidateSpherePreview(materialId: string): void {
++  previewCache.delete(materialId);
++}
 +
-+    this.label.scale.set(width, height, 1);
-+    this.label.position.set(options.center.x, -options.center.z, LABEL_HEIGHT);
++export function disposeSpherePreviewRenderer(): void {
++  if (previewRenderer) {
++    previewRenderer.dispose();
++    previewRenderer = null;
++  }
++  if (previewSphere) {
++    previewSphere.geometry.dispose();
++    previewSphere = null;
++  }
++  previewScene?.clear();
++  previewScene = null;
++  previewCamera = null;
++  previewCache.clear();
++}
+diff --git a/src/objects/BaseMesh.ts b/src/objects/BaseMesh.ts
+index 2addf48..8f20682 100644
+--- a/src/objects/BaseMesh.ts
++++ b/src/objects/BaseMesh.ts
+@@ -6,6 +6,10 @@ export abstract class BaseMesh extends THREE.Mesh {
+   isSelected = false;
+   isHovered = false;
+ 
++  customMaterial: THREE.Material | null = null;
++  customMaterialId: string | null = null;
++  previewMaterial: THREE.Material | null = null;
++
+   protected defaultMaterial: THREE.Material;
+   protected hoverMaterial: THREE.Material;
+   protected selectMaterial: THREE.Material;
+@@ -15,13 +19,24 @@ export abstract class BaseMesh extends THREE.Mesh {
+     material?: THREE.Material | THREE.Material[],
+   ) {
+     const baseMat = Array.isArray(material) ? material[0] : material;
+-    const defaultMat = baseMat ?? new THREE.MeshStandardMaterial({ color: 0xcccccc });
++    const defaultMat = baseMat ?? new THREE.MeshStandardMaterial({ color: 0xd1d5db, roughness: 0.7 });
+ 
+     super(geometry, defaultMat);
+ 
++    this.castShadow = true;
++    this.receiveShadow = true;
++
+     this.defaultMaterial = defaultMat;
+-    this.hoverMaterial = new THREE.MeshStandardMaterial({ color: 0x64b5f6 });
+-    this.selectMaterial = new THREE.MeshStandardMaterial({ color: 0xffb74d });
++    this.hoverMaterial = new THREE.MeshStandardMaterial({
++      color: 0x93c5fd,
++      roughness: 0.4,
++      transparent: true,
++      opacity: 0.85,
++    });
++    this.selectMaterial = new THREE.MeshStandardMaterial({
++      color: 0xf59e0b,
++      roughness: 0.4,
++    });
+   }
+ 
+   setSelected(selected: boolean): void {
+@@ -36,13 +51,40 @@ export abstract class BaseMesh extends THREE.Mesh {
+     this.updateMaterialState();
+   }
+ 
++  setCustomMaterial(material: THREE.Material | null, materialId?: string): void {
++    this.customMaterial = material;
++    this.customMaterialId = materialId ?? (material ? 'custom' : null);
++    this.updateMaterialState();
 +  }
 +
-+  private drawLabel(title: string, subtitle: string): void {
-+    const context = this.labelCanvas.getContext('2d');
++  getCustomMaterial(): THREE.Material | null {
++    return this.customMaterial;
++  }
 +
-+    if (!context) {
++  getCustomMaterialId(): string | null {
++    return this.customMaterialId;
++  }
++
++  setPreviewMaterial(material: THREE.Material | null): void {
++    this.previewMaterial = material;
++    this.updateMaterialState();
++  }
++
+   protected updateMaterialState(): void {
++    if (this.previewMaterial) {
++      this.material = this.previewMaterial;
 +      return;
 +    }
 +
-+    const width = this.labelCanvas.width;
-+    const height = this.labelCanvas.height;
++    const currentBase = this.customMaterial ?? this.defaultMaterial;
 +
-+    context.clearRect(0, 0, width, height);
+     if (this.isSelected) {
+-      this.material = this.selectMaterial;
++      // Show actual realistic material on the faces when selected, with edges highlighted
++      this.material = currentBase;
+     } else if (this.isHovered) {
+       this.material = this.hoverMaterial;
+     } else {
+-      this.material = this.defaultMaterial;
++      this.material = currentBase;
+     }
+   }
+ 
+@@ -54,17 +96,11 @@ export abstract class BaseMesh extends THREE.Mesh {
+     this.disposeMaterial(this.defaultMaterial);
+     this.disposeMaterial(this.hoverMaterial);
+     this.disposeMaterial(this.selectMaterial);
+-
+-    if (Array.isArray(this.material)) {
+-      for (const mat of this.material) {
+-        mat.dispose();
+-      }
+-    } else if (this.material) {
+-      this.material.dispose();
+-    }
++    this.previewMaterial = null;
++    this.customMaterial = null;
+   }
+ 
+-  private disposeMaterial(material: THREE.Material): void {
++  protected disposeMaterial(material?: THREE.Material | null): void {
+     if (material) {
+       material.dispose();
+     }
+diff --git a/src/objects/RoomMesh.ts b/src/objects/RoomMesh.ts
+index 5ac0ba2..0c9214e 100644
+--- a/src/objects/RoomMesh.ts
++++ b/src/objects/RoomMesh.ts
+@@ -63,6 +63,9 @@ export class RoomMesh extends BaseMesh {
+ 
+     super(RoomMesh.createGeometry(options.polygon), material);
+ 
++    this.castShadow = false;
++    this.receiveShadow = true;
 +
-+    context.fillStyle = 'rgba(15, 23, 42, 0.78)';
-+    context.beginPath();
-+    context.roundRect(8, 8, width - 16, height - 16, 26);
-+    context.fill();
+     this.roomId = roomId;
+     this.floorMaterial = material;
+ 
+diff --git a/src/objects/WallMesh.ts b/src/objects/WallMesh.ts
+index 6b33465..115e316 100644
+--- a/src/objects/WallMesh.ts
++++ b/src/objects/WallMesh.ts
+@@ -8,6 +8,7 @@ import {
+   type OpeningValidation,
+ } from '../utils/openingLayout';
+ import type { OpeningParams } from '../types/Opening';
++import { getPlasterTexture } from '../materials/proceduralTextures';
+ 
+ export interface WallOptions {
+   startPoint: THREE.Vector3;
+@@ -60,14 +61,17 @@ export class WallMesh extends BaseMesh {
+       });
+     } else {
+       defaultMat = new THREE.MeshStandardMaterial({
+-        color: 0xd1d5db,
+-        roughness: 0.5,
+-        metalness: 0.1,
++        map: getPlasterTexture(),
++        roughness: 0.85,
++        metalness: 0.02,
+       });
+     }
+ 
+     super(new THREE.BoxGeometry(1, 1, 1), defaultMat);
+ 
++    this.castShadow = !isPreview;
++    this.receiveShadow = !isPreview;
 +
-+    context.strokeStyle = 'rgba(125, 211, 252, 0.7)';
-+    context.lineWidth = 4;
-+    context.stroke();
+     this.isPreview = isPreview;
+     this.isRoomBoundary = options.isRoomBoundary ?? true;
+     this.startPoint = options.startPoint.clone();
+@@ -77,15 +81,17 @@ export class WallMesh extends BaseMesh {
+ 
+     if (!isPreview) {
+       this.hoverMaterial = new THREE.MeshStandardMaterial({
+-        color: 0x60a5fa,
++        color: 0x93c5fd,
+         roughness: 0.4,
++        transparent: true,
++        opacity: 0.85,
+       });
+       this.selectMaterial = new THREE.MeshStandardMaterial({
+         color: 0xf59e0b,
+         roughness: 0.4,
+       });
+ 
+-      // Edge outline for crisp appearance
++      // Edge outline for crisp architectural appearance
+       const edgeGeo = new THREE.EdgesGeometry(this.geometry);
+       const edgeMat = new THREE.LineBasicMaterial({
+         color: 0x374151,
+@@ -98,6 +104,21 @@ export class WallMesh extends BaseMesh {
+     this.updateGeometry();
+   }
+ 
++  protected override updateMaterialState(): void {
++    super.updateMaterialState();
 +
-+    context.textAlign = 'center';
-+    context.textBaseline = 'middle';
-+
-+    context.fillStyle = '#f8fafc';
-+    context.font = 'bold 62px sans-serif';
-+    context.fillText(title, width / 2, height / 2 - 26, width - 48);
-+
-+    context.fillStyle = '#7dd3fc';
-+    context.font = '46px sans-serif';
-+    context.fillText(subtitle, width / 2, height / 2 + 38, width - 48);
-+
-+    this.labelTexture.needsUpdate = true;
++    if (this.edgesMesh) {
++      const edgeMat = this.edgesMesh.material as THREE.LineBasicMaterial;
++      if (this.isSelected) {
++        edgeMat.color.setHex(0xf59e0b); // Vibrant orange edge for selected wall
++      } else if (this.isHovered) {
++        edgeMat.color.setHex(0x60a5fa); // Sky blue edge for hovered wall
++      } else {
++        edgeMat.color.setHex(0x374151); // Dark neutral edge
++      }
++    }
 +  }
++
+   getOrientation(): WallOrientation {
+     const dx = Math.abs(this.endPoint.x - this.startPoint.x);
+     const dz = Math.abs(this.endPoint.z - this.startPoint.z);
+diff --git a/src/objects/openings/DoorMesh.ts b/src/objects/openings/DoorMesh.ts
+index 065e092..66bb113 100644
+--- a/src/objects/openings/DoorMesh.ts
++++ b/src/objects/openings/DoorMesh.ts
+@@ -3,6 +3,7 @@ import * as THREE from 'three';
+ import { Opening } from './Opening';
+ import { createFrameGeometry } from '../../utils/profileGeometry';
+ import type { OpeningParams, OpeningType } from '../../types/Opening';
++import { getWoodTexture } from '../../materials/proceduralTextures';
+ 
+ /** Width of the door jamb members. */
+ const JAMB_WIDTH = 0.05;
+@@ -28,18 +29,58 @@ const HANDLE_HEIGHT = 1.02;
+ export class DoorMesh extends Opening {
+   readonly type: OpeningType = 'door';
+ 
++  leafMaterialId = 'wall-oak';
++  frameMaterialId = 'trim-white';
++
++  private frameMaterial: THREE.Material;
++
+   constructor(params: OpeningParams, isPreview = false) {
+     super(params, isPreview);
+ 
+-    this.replaceMaterials(
+-      new THREE.MeshStandardMaterial({
+-        color: 0x9a6b43,
+-        roughness: 0.65,
+-        metalness: 0.05,
+-      }),
+-      new THREE.MeshStandardMaterial({ color: 0xc79a6b, roughness: 0.55 }),
+-      new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.45 }),
+-    );
++    const defaultLeaf = new THREE.MeshStandardMaterial({
++      map: getWoodTexture(false),
++      roughness: 0.55,
++      metalness: 0.02,
++    });
++
++    const hoverLeaf = new THREE.MeshStandardMaterial({
++      color: 0x93c5fd,
++      roughness: 0.5,
++      transparent: true,
++      opacity: 0.85,
++    });
++
++    const selectLeaf = new THREE.MeshStandardMaterial({
++      color: 0xf59e0b,
++      roughness: 0.45,
++    });
++
++    this.frameMaterial = new THREE.MeshStandardMaterial({
++      color: 0xf8fafc,
++      roughness: 0.4,
++      metalness: 0.05,
++    });
++
++    this.replaceMaterials(defaultLeaf, hoverLeaf, selectLeaf);
++  }
++
++  setLeafMaterial(material: THREE.Material, id = 'custom'): void {
++    this.leafMaterialId = id;
++    this.setCustomMaterial(material, id);
++  }
++
++  getLeafMaterial(): THREE.Material {
++    return this.customMaterial ?? this.defaultMaterial;
++  }
++
++  setFrameMaterial(material: THREE.Material, id = 'custom'): void {
++    this.frameMaterialId = id;
++    this.frameMaterial = material;
++    this.build();
++  }
++
++  getFrameMaterial(): THREE.Material {
++    return this.frameMaterial;
+   }
+ 
+   private getLeafSize(wallThickness: number): {
+@@ -79,17 +120,14 @@ export class DoorMesh extends Opening {
+     // createFrameGeometry centres on the outer height; realign to the opening.
+     jambGeometry.translate(0, FRAME_EMBED / 2, 0);
+ 
+-    const jamb = new THREE.Mesh(
+-      jambGeometry,
+-      new THREE.MeshStandardMaterial({ color: 0xf3f4f6, roughness: 0.6 }),
+-    );
++    const jamb = new THREE.Mesh(jambGeometry, this.frameMaterial);
+ 
+     const handle = new THREE.Mesh(
+       new THREE.SphereGeometry(0.035, 14, 10),
+       new THREE.MeshStandardMaterial({
+         color: 0xfbbf24,
+-        metalness: 0.75,
+-        roughness: 0.25,
++        metalness: 0.85,
++        roughness: 0.2,
+       }),
+     );
+ 
+@@ -101,4 +139,9 @@ export class DoorMesh extends Opening {
+ 
+     return [jamb, handle];
+   }
 +
 +  override dispose(): void {
-+    this.remove(this.outline);
-+    this.outline.geometry.dispose();
-+    this.outline.material.dispose();
-+
-+    this.remove(this.label);
-+    this.label.material.map = null;
-+    this.label.material.dispose();
-+    this.labelTexture.dispose();
-+
++    this.frameMaterial.dispose();
 +    super.dispose();
 +  }
-+}
-diff --git a/src/types/Room.ts b/src/types/Room.ts
+ }
+diff --git a/src/objects/openings/Opening.ts b/src/objects/openings/Opening.ts
+index c977030..3164161 100644
+--- a/src/objects/openings/Opening.ts
++++ b/src/objects/openings/Opening.ts
+@@ -59,6 +59,11 @@ export abstract class Opening extends BaseMesh {
+       });
+ 
+       this.renderOrder = PREVIEW_RENDER_ORDER;
++      this.castShadow = false;
++      this.receiveShadow = false;
++    } else {
++      this.castShadow = true;
++      this.receiveShadow = true;
+     }
+   }
+ 
+@@ -143,6 +148,14 @@ export abstract class Opening extends BaseMesh {
+     this.clearDecorations();
+ 
+     for (const decoration of this.createDecorations(wallThickness)) {
++      if (!this.isPreview) {
++        decoration.traverse((child) => {
++          if ((child as THREE.Mesh).isMesh) {
++            child.castShadow = true;
++            child.receiveShadow = true;
++          }
++        });
++      }
+       this.decorations.push(decoration);
+       this.add(decoration);
+     }
+diff --git a/src/objects/openings/WindowMesh.ts b/src/objects/openings/WindowMesh.ts
+index 08f76b2..74a4fb5 100644
+--- a/src/objects/openings/WindowMesh.ts
++++ b/src/objects/openings/WindowMesh.ts
+@@ -3,6 +3,7 @@ import * as THREE from 'three';
+ import { Opening } from './Opening';
+ import { createFrameGeometry } from '../../utils/profileGeometry';
+ import type { OpeningParams, OpeningType } from '../../types/Opening';
++import { createPhysicalGlassMaterial } from '../../materials/materialLibrary';
+ 
+ /** Width of the window frame members. */
+ const FRAME_WIDTH = 0.06;
+@@ -16,37 +17,73 @@ const FRAME_EMBED = 0.003;
+ /** Width of the cross mullions. */
+ const MULLION_WIDTH = 0.03;
+ 
+-function createGlassMaterial(
+-  color: number,
+-  opacity: number,
+-): THREE.MeshStandardMaterial {
+-  return new THREE.MeshStandardMaterial({
+-    color,
+-    transparent: true,
+-    opacity,
+-    roughness: 0.08,
+-    metalness: 0.0,
+-    side: THREE.DoubleSide,
+-  });
+-}
+-
+ /**
+  * A window: a hole that floats above floor level, filled with a frame,
+- * a pair of mullions and a glazed pane.
++ * a pair of mullions and a glazed physical pane.
+  *
+  * The pane is the mesh body, so the whole glazed area is pickable.
+  */
+ export class WindowMesh extends Opening {
+   readonly type: OpeningType = 'window';
+ 
++  glassMaterialId = 'glass-clear';
++  frameMaterialId = 'trim-white';
++
++  private frameMaterial: THREE.Material;
++
+   constructor(params: OpeningParams, isPreview = false) {
+     super(params, isPreview);
+ 
+-    this.replaceMaterials(
+-      createGlassMaterial(0x9ecbff, 0.3),
+-      createGlassMaterial(0x60a5fa, 0.5),
+-      createGlassMaterial(0xf59e0b, 0.55),
+-    );
++    const defaultGlass = createPhysicalGlassMaterial({
++      color: 0xffffff,
++      transmission: 0.94,
++      roughness: 0.03,
++      ior: 1.52,
++      thickness: 0.05,
++    });
++
++    const hoverGlass = createPhysicalGlassMaterial({
++      color: 0x93c5fd,
++      transmission: 0.85,
++      roughness: 0.15,
++      ior: 1.52,
++      thickness: 0.05,
++    });
++
++    const selectGlass = createPhysicalGlassMaterial({
++      color: 0xfde68a,
++      transmission: 0.82,
++      roughness: 0.1,
++      ior: 1.52,
++      thickness: 0.05,
++    });
++
++    this.frameMaterial = new THREE.MeshStandardMaterial({
++      color: 0xf8fafc,
++      roughness: 0.35,
++      metalness: 0.05,
++    });
++
++    this.replaceMaterials(defaultGlass, hoverGlass, selectGlass);
++  }
++
++  setGlassMaterial(material: THREE.Material, id = 'custom'): void {
++    this.glassMaterialId = id;
++    this.setCustomMaterial(material, id);
++  }
++
++  getGlassMaterial(): THREE.Material {
++    return this.customMaterial ?? this.defaultMaterial;
++  }
++
++  setFrameMaterial(material: THREE.Material, id = 'custom'): void {
++    this.frameMaterialId = id;
++    this.frameMaterial = material;
++    this.build();
++  }
++
++  getFrameMaterial(): THREE.Material {
++    return this.frameMaterial;
+   }
+ 
+   private getGlassSize(): { width: number; height: number } {
+@@ -72,25 +109,25 @@ export class WindowMesh extends Opening {
+       thickness: FRAME_WIDTH + FRAME_EMBED,
+     });
+ 
+-    const frameMaterial = new THREE.MeshStandardMaterial({
+-      color: 0xf3f4f6,
+-      roughness: 0.55,
+-    });
+-
+-    const frame = new THREE.Mesh(frameGeometry, frameMaterial);
++    const frame = new THREE.Mesh(frameGeometry, this.frameMaterial);
+ 
+     const mullionDepth = GLASS_THICKNESS + 0.02;
+ 
+     const vertical = new THREE.Mesh(
+       new THREE.BoxGeometry(MULLION_WIDTH, glass.height, mullionDepth),
+-      frameMaterial,
++      this.frameMaterial,
+     );
+ 
+     const horizontal = new THREE.Mesh(
+       new THREE.BoxGeometry(glass.width, MULLION_WIDTH, mullionDepth),
+-      frameMaterial,
++      this.frameMaterial,
+     );
+ 
+     return [frame, vertical, horizontal];
+   }
++
++  override dispose(): void {
++    this.frameMaterial.dispose();
++    super.dispose();
++  }
+ }
+diff --git a/src/ui/CollapsibleSection.tsx b/src/ui/CollapsibleSection.tsx
 new file mode 100644
-index 0000000..f5d47f8
+index 0000000..97b37d8
 --- /dev/null
-+++ b/src/types/Room.ts
-@@ -0,0 +1,68 @@
-+/**
-+ * Shared, renderer agnostic description of a detected room.
-+ *
-+ * A room is never authored by the user: it is derived from the wall layout.
-+ * Whenever the walls form a closed region on the ground plane, that region
-+ * becomes a room. Because the detection works on the wall graph, walls are
-+ * free to be shared by several rooms and interior partitions simply split the
-+ * space they divide.
-+ */
++++ b/src/ui/CollapsibleSection.tsx
+@@ -0,0 +1,39 @@
++import React from 'react';
 +
-+/** A point on the ground (XZ) plane. */
-+export interface RoomPoint {
-+  x: number;
-+  z: number;
++interface CollapsibleSectionProps {
++  title: string;
++  isOpen: boolean;
++  onToggle: () => void;
++  icon?: string;
++  badge?: string | number;
++  children: React.ReactNode;
 +}
 +
-+/** Axis aligned bounding box of a room on the ground plane. */
-+export interface RoomBounds {
-+  minX: number;
-+  maxX: number;
-+  minZ: number;
-+  maxZ: number;
++export const CollapsibleSection: React.FC<CollapsibleSectionProps> = ({
++  title,
++  isOpen,
++  onToggle,
++  icon,
++  badge,
++  children,
++}) => {
++  return (
++    <div className={`ui-collapsible-section ${isOpen ? 'open' : 'closed'}`}>
++      <button
++        type="button"
++        className="ui-collapsible-header"
++        onClick={onToggle}
++        aria-expanded={isOpen}
++      >
++        <div className="ui-collapsible-title-wrapper">
++          <span className={`ui-chevron ${isOpen ? 'open' : ''}`}>▶</span>
++          {icon && <span className="ui-collapsible-icon">{icon}</span>}
++          <span className="ui-collapsible-title">{title}</span>
++        </div>
++        {badge !== undefined && <span className="ui-collapsible-badge">{badge}</span>}
++      </button>
++
++      {isOpen && <div className="ui-collapsible-body">{children}</div>}
++    </div>
++  );
++};
+diff --git a/src/ui/MaterialPicker.tsx b/src/ui/MaterialPicker.tsx
+new file mode 100644
+index 0000000..fcf17f4
+--- /dev/null
++++ b/src/ui/MaterialPicker.tsx
+@@ -0,0 +1,143 @@
++import React, { useRef, useState, useId } from 'react';
++import * as THREE from 'three';
++import {
++  getAllMaterials,
++  createMaterialFromImageFile,
++  type MaterialCategory,
++  type MaterialDefinition,
++} from '../materials/materialLibrary';
++import { generateMaterialSpherePreview } from '../materials/spherePreview';
++
++interface MaterialPickerProps {
++  currentMaterialId?: string | null;
++  allowedCategories?: MaterialCategory[];
++  onSelectMaterial: (material: THREE.Material, materialId: string) => void;
++  onPreviewMaterial?: (material: THREE.Material | null) => void;
++  title?: string;
 +}
 +
-+/**
-+ * The minimum a wall has to expose to take part in room detection.
-+ *
-+ * `WallMesh` satisfies this structurally, which keeps the detection itself
-+ * free of any Three.js / scene graph knowledge.
-+ */
-+export interface RoomWallLike {
-+  readonly startPoint: { x: number; z: number };
-+  readonly endPoint: { x: number; z: number };
-+  readonly width: number;
-+}
++export const MaterialPicker: React.FC<MaterialPickerProps> = ({
++  currentMaterialId,
++  allowedCategories,
++  onSelectMaterial,
++  onPreviewMaterial,
++  title = 'Select Material',
++}) => {
++  const [selectedCategory, setSelectedCategory] = useState<string>('all');
++  const [materials, setMaterials] = useState<MaterialDefinition[]>(() => getAllMaterials());
++  const [uploading, setUploading] = useState(false);
++  const fileInputRef = useRef<HTMLInputElement>(null);
++  const fileInputId = useId();
 +
-+/**
-+ * One closed region found in the wall layout.
-+ */
-+export interface DetectedRoom<TWall extends RoomWallLike> {
-+  /**
-+   * Stable identity derived from the room's geometry.
-+   *
-+   * Rebuilding the model re-uses the same id for an unchanged room, so the
-+   * scene objects representing it can be kept alive.
-+   */
-+  id: string;
++  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
++    const file = event.target.files?.[0];
++    if (!file) return;
 +
-+  /** Floor outline, inset to the inner faces of the bounding walls. */
-+  polygon: RoomPoint[];
++    try {
++      setUploading(true);
++      const customDef = await createMaterialFromImageFile(file);
++      setMaterials(getAllMaterials());
++      onSelectMaterial(customDef.material, customDef.id);
++    } catch (err) {
++      console.error('Failed to load custom material file', err);
++    } finally {
++      setUploading(false);
++      if (fileInputRef.current) {
++        fileInputRef.current.value = '';
++      }
++    }
++  };
 +
-+  /** Raw loop through the wall centre lines. */
-+  centerline: RoomPoint[];
++  const filteredMaterials = materials.filter((item) => {
++    if (allowedCategories && allowedCategories.length > 0) {
++      if (!allowedCategories.includes(item.category) && item.category !== 'custom') {
++        return false;
++      }
++    }
++    if (selectedCategory === 'all') return true;
++    return item.category === selectedCategory;
++  });
 +
-+  /** Floor area in m², measured on the inset polygon. */
-+  area: number;
-+
-+  /** Length of the inset outline in m. */
-+  perimeter: number;
-+
-+  /** A point inside (or at least near the middle of) the room. */
-+  center: RoomPoint;
-+
-+  bounds: RoomBounds;
-+
-+  /** Walls that bound this room. A shared wall appears in both rooms. */
-+  walls: TWall[];
-+}
-diff --git a/src/ui/UIOverlay.tsx b/src/ui/UIOverlay.tsx
-index 2031900..89e88a9 100644
---- a/src/ui/UIOverlay.tsx
-+++ b/src/ui/UIOverlay.tsx
-@@ -3,6 +3,7 @@ import type {
-   ToolMode,
-   WallToolComponent,
- } from '../components/WallToolComponent';
-+import type { RoomComponent, RoomInfo } from '../components/RoomComponent';
- import type { WallMesh } from '../objects/WallMesh';
- import type { Opening } from '../objects/openings/Opening';
- import { OPENING_LABELS, isGroundedOpeningType } from '../types/Opening';
-@@ -10,6 +11,7 @@ import './UIOverlay.css';
- 
- interface UIOverlayProps {
-   wallTool: WallToolComponent | null;
-+  roomTool: RoomComponent | null;
- }
- 
- const MODE_BUTTONS: ReadonlyArray<{ mode: ToolMode; label: string }> = [
-@@ -34,12 +36,66 @@ function parseNonNegative(value: string): number | null {
-   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
- }
- 
-+interface RoomPanelProps {
-+  roomTool: RoomComponent;
-+}
-+
-+const RoomPanel: React.FC<RoomPanelProps> = ({ roomTool }) => {
-+  const rooms = roomTool.rooms;
++  // Collect available categories
++  const categories: string[] = ['all'];
++  materials.forEach((m) => {
++    if (!allowedCategories || allowedCategories.includes(m.category) || m.category === 'custom') {
++      if (!categories.includes(m.category)) {
++        categories.push(m.category);
++      }
++    }
++  });
 +
 +  return (
-+    <div className="ui-inspector">
-+      <h3 className="ui-section-title">Rooms ({rooms.length})</h3>
-+
-+      <div className="ui-mode-toggle">
++    <div className="ui-material-picker">
++      <div className="ui-material-picker-header">
++        <span className="ui-picker-title">{title}</span>
 +        <button
 +          type="button"
-+          className={`ui-btn ${roomTool.showFloors ? 'active' : ''}`}
-+          onClick={() => roomTool.toggleFloors()}
++          className="ui-btn-upload"
++          onClick={() => fileInputRef.current?.click()}
++          disabled={uploading}
++          title="Import texture image from your computer"
 +        >
-+          🟦 Floors
++          {uploading ? '⏳ Loading...' : '📁 Add From File'}
 +        </button>
-+        <button
-+          type="button"
-+          className={`ui-btn ${roomTool.showLabels ? 'active' : ''}`}
-+          onClick={() => roomTool.toggleLabels()}
-+        >
-+          🏷️ Labels
-+        </button>
++        <input
++          id={fileInputId}
++          ref={fileInputRef}
++          type="file"
++          accept="image/png,image/jpeg,image/webp,image/jpg"
++          style={{ display: 'none' }}
++          onChange={handleFileUpload}
++        />
 +      </div>
 +
-+      {rooms.length === 0 ? (
-+        <div className="ui-instruction">
-+          No rooms yet. Close a region with walls and it is detected
-+          automatically.
-+        </div>
-+      ) : (
-+        <ul className="ui-list">
-+          {rooms.map((room) => (
-+            <li key={room.id} className="ui-list-item">
-+              <span>{room.name}</span>
-+              <span>
-+                {room.area.toFixed(2)} m² · {room.walls.length} walls
-+              </span>
-+            </li>
++      {categories.length > 2 && (
++        <div className="ui-category-pills">
++          {categories.map((cat) => (
++            <button
++              key={cat}
++              type="button"
++              className={`ui-category-pill ${selectedCategory === cat ? 'active' : ''}`}
++              onClick={() => setSelectedCategory(cat)}
++            >
++              {cat.charAt(0).toUpperCase() + cat.slice(1)}
++            </button>
 +          ))}
-+        </ul>
++        </div>
++      )}
++
++      <div className="ui-material-grid">
++        {filteredMaterials.map((item) => {
++          const previewUrl = generateMaterialSpherePreview(item.id, item.material);
++          const isSelected = currentMaterialId === item.id;
++
++          return (
++            <button
++              key={item.id}
++              type="button"
++              className={`ui-material-card ${isSelected ? 'active' : ''}`}
++              onClick={() => onSelectMaterial(item.material, item.id)}
++              onMouseEnter={() => onPreviewMaterial?.(item.material)}
++              onMouseLeave={() => onPreviewMaterial?.(null)}
++              title={item.description || item.name}
++            >
++              <div className="ui-material-sphere-wrapper">
++                {previewUrl ? (
++                  <img
++                    src={previewUrl}
++                    alt={item.name}
++                    className="ui-material-sphere-img"
++                  />
++                ) : (
++                  <div className="ui-material-sphere-placeholder" />
++                )}
++                {isSelected && <span className="ui-material-check">✓</span>}
++              </div>
++              <span className="ui-material-name">{item.name}</span>
++            </button>
++          );
++        })}
++      </div>
++    </div>
++  );
++};
+diff --git a/src/ui/UIOverlay.css b/src/ui/UIOverlay.css
+index b330258..d65f7c9 100644
+--- a/src/ui/UIOverlay.css
++++ b/src/ui/UIOverlay.css
+@@ -2,26 +2,52 @@
+   position: absolute;
+   top: 16px;
+   left: 16px;
++  bottom: 16px;
+   z-index: 100;
+   pointer-events: none;
+   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+   user-select: none;
++  display: flex;
++  flex-direction: column;
+ }
+ 
+ .ui-card {
+   pointer-events: auto;
+-  background: rgba(18, 24, 38, 0.88);
+-  backdrop-filter: blur(12px);
+-  -webkit-backdrop-filter: blur(12px);
+-  border: 1px solid rgba(255, 255, 255, 0.12);
+-  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
++  background: rgba(18, 24, 38, 0.92);
++  backdrop-filter: blur(16px);
++  -webkit-backdrop-filter: blur(16px);
++  border: 1px solid rgba(255, 255, 255, 0.14);
++  box-shadow: 0 12px 40px 0 rgba(0, 0, 0, 0.45);
+   border-radius: 12px;
+-  padding: 16px;
+-  width: 260px;
++  padding: 14px;
++  width: 290px;
++  max-height: 100%;
++  overflow-y: auto;
+   color: #f3f4f6;
+   display: flex;
+   flex-direction: column;
+-  gap: 12px;
++  gap: 10px;
++}
++
++/* Custom Scrollbars */
++.ui-card::-webkit-scrollbar,
++.ui-material-grid::-webkit-scrollbar,
++.ui-list::-webkit-scrollbar {
++  width: 5px;
++}
++
++.ui-card::-webkit-scrollbar-track,
++.ui-material-grid::-webkit-scrollbar-track,
++.ui-list::-webkit-scrollbar-track {
++  background: rgba(0, 0, 0, 0.2);
++  border-radius: 4px;
++}
++
++.ui-card::-webkit-scrollbar-thumb,
++.ui-material-grid::-webkit-scrollbar-thumb,
++.ui-list::-webkit-scrollbar-thumb {
++  background: rgba(255, 255, 255, 0.2);
++  border-radius: 4px;
+ }
+ 
+ .ui-header {
+@@ -40,7 +66,7 @@
+ .ui-mode-toggle {
+   display: grid;
+   grid-template-columns: 1fr 1fr;
+-  background: rgba(0, 0, 0, 0.3);
++  background: rgba(0, 0, 0, 0.35);
+   border-radius: 8px;
+   padding: 3px;
+   gap: 4px;
+@@ -78,11 +104,11 @@
+   background: rgba(239, 68, 68, 0.15);
+   color: #f87171;
+   border: 1px solid rgba(239, 68, 68, 0.3);
+-  margin-top: 8px;
++  margin-top: 6px;
+ }
+ 
+ .ui-btn-danger:hover {
+-  background: rgba(239, 68, 68, 0.8);
++  background: rgba(239, 68, 68, 0.85);
+   color: #ffffff;
+ }
+ 
+@@ -114,7 +140,7 @@
+   display: flex;
+   flex-direction: column;
+   gap: 4px;
+-  max-height: 140px;
++  max-height: 130px;
+   overflow-y: auto;
+ }
+ 
+@@ -150,13 +176,13 @@
+ .ui-inspector {
+   display: flex;
+   flex-direction: column;
+-  gap: 10px;
++  gap: 8px;
+   border-top: 1px solid rgba(255, 255, 255, 0.1);
+-  padding-top: 10px;
++  padding-top: 8px;
+ }
+ 
+ .ui-section-title {
+-  margin: 0;
++  margin: 0 0 4px 0;
+   font-size: 13px;
+   font-weight: 600;
+   color: #f3f4f6;
+@@ -165,38 +191,271 @@
+ .ui-field {
+   display: flex;
+   flex-direction: column;
+-  gap: 4px;
++  gap: 3px;
++  margin-bottom: 6px;
++}
+ 
+-  label {
+-    font-size: 12px;
+-    color: #9ca3af;
+-  }
++.ui-field label {
++  font-size: 11.5px;
++  color: #9ca3af;
++}
+ 
+-  input {
+-    background: rgba(0, 0, 0, 0.4);
+-    border: 1px solid rgba(255, 255, 255, 0.15);
+-    border-radius: 6px;
+-    padding: 6px 10px;
+-    color: #ffffff;
+-    font-size: 13px;
+-    outline: none;
+-    transition: border-color 0.2s;
+-  }
++.ui-field input {
++  background: rgba(0, 0, 0, 0.4);
++  border: 1px solid rgba(255, 255, 255, 0.15);
++  border-radius: 6px;
++  padding: 5px 8px;
++  color: #ffffff;
++  font-size: 12.5px;
++  outline: none;
++  transition: border-color 0.2s;
++}
+ 
+-  input:focus {
+-    border-color: #2563eb;
+-  }
++.ui-field input:focus {
++  border-color: #2563eb;
+ }
+ 
+ .ui-field-readonly {
+   display: flex;
+   justify-content: space-between;
+   align-items: center;
+-  font-size: 12px;
++  font-size: 11.5px;
+   color: #9ca3af;
++  margin-bottom: 4px;
++}
+ 
+-  strong {
+-    color: #e5e7eb;
+-    font-weight: 500;
+-  }
++.ui-field-readonly strong {
++  color: #e5e7eb;
++  font-weight: 500;
++}
++
++/* ----------------------------------------------------
++ * Collapsible Section Styles
++ * ---------------------------------------------------- */
++.ui-collapsible-section {
++  border: 1px solid rgba(255, 255, 255, 0.08);
++  border-radius: 8px;
++  background: rgba(0, 0, 0, 0.2);
++  overflow: hidden;
++  transition: all 0.2s ease;
++}
++
++.ui-collapsible-section.open {
++  border-color: rgba(255, 255, 255, 0.16);
++  background: rgba(0, 0, 0, 0.3);
++}
++
++.ui-collapsible-header {
++  width: 100%;
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  background: transparent;
++  border: none;
++  padding: 8px 10px;
++  color: #e2e8f0;
++  font-size: 12.5px;
++  font-weight: 600;
++  cursor: pointer;
++  text-align: left;
++  transition: background 0.15s ease;
++}
++
++.ui-collapsible-header:hover {
++  background: rgba(255, 255, 255, 0.06);
++  color: #ffffff;
++}
++
++.ui-collapsible-title-wrapper {
++  display: flex;
++  align-items: center;
++  gap: 6px;
++}
++
++.ui-chevron {
++  font-size: 9px;
++  color: #94a3b8;
++  display: inline-block;
++  transition: transform 0.2s ease;
++}
++
++.ui-chevron.open {
++  transform: rotate(90deg);
++  color: #60a5fa;
++}
++
++.ui-collapsible-badge {
++  font-size: 11px;
++  background: rgba(255, 255, 255, 0.12);
++  padding: 2px 6px;
++  border-radius: 10px;
++  color: #94a3b8;
++}
++
++.ui-collapsible-body {
++  padding: 10px;
++  border-top: 1px solid rgba(255, 255, 255, 0.08);
++  display: flex;
++  flex-direction: column;
++  gap: 8px;
++}
++
++/* ----------------------------------------------------
++ * Material Picker & Unity-Style Sphere Thumbnails
++ * ---------------------------------------------------- */
++.ui-material-picker {
++  display: flex;
++  flex-direction: column;
++  gap: 8px;
++}
++
++.ui-material-picker-header {
++  display: flex;
++  justify-content: space-between;
++  align-items: center;
++}
++
++.ui-picker-title {
++  font-size: 12px;
++  font-weight: 600;
++  color: #cbd5e1;
++}
++
++.ui-btn-upload {
++  background: rgba(59, 130, 246, 0.18);
++  border: 1px solid rgba(59, 130, 246, 0.4);
++  color: #93c5fd;
++  font-size: 11px;
++  font-weight: 500;
++  padding: 4px 8px;
++  border-radius: 5px;
++  cursor: pointer;
++  transition: all 0.15s ease;
++}
++
++.ui-btn-upload:hover {
++  background: rgba(59, 130, 246, 0.35);
++  color: #ffffff;
++}
++
++.ui-category-pills {
++  display: flex;
++  gap: 4px;
++  overflow-x: auto;
++  padding-bottom: 2px;
++}
++
++.ui-category-pill {
++  background: rgba(255, 255, 255, 0.06);
++  border: 1px solid rgba(255, 255, 255, 0.08);
++  color: #94a3b8;
++  font-size: 10.5px;
++  padding: 3px 7px;
++  border-radius: 12px;
++  cursor: pointer;
++  white-space: nowrap;
++  transition: all 0.15s ease;
++}
++
++.ui-category-pill:hover {
++  background: rgba(255, 255, 255, 0.12);
++  color: #ffffff;
++}
++
++.ui-category-pill.active {
++  background: #3b82f6;
++  border-color: #3b82f6;
++  color: #ffffff;
++}
++
++.ui-material-grid {
++  display: grid;
++  grid-template-columns: repeat(2, 1fr);
++  gap: 6px;
++  max-height: 180px;
++  overflow-y: auto;
++  padding: 2px;
++}
++
++.ui-material-card {
++  display: flex;
++  flex-direction: column;
++  align-items: center;
++  gap: 4px;
++  background: rgba(255, 255, 255, 0.04);
++  border: 1px solid rgba(255, 255, 255, 0.1);
++  border-radius: 8px;
++  padding: 6px 4px;
++  cursor: pointer;
++  transition: all 0.18s ease;
++  color: #cbd5e1;
++}
++
++.ui-material-card:hover {
++  background: rgba(255, 255, 255, 0.1);
++  border-color: rgba(96, 165, 250, 0.5);
++  transform: translateY(-1px);
++}
++
++.ui-material-card.active {
++  border-color: #3b82f6;
++  background: rgba(59, 130, 246, 0.2);
++  box-shadow: 0 0 10px rgba(59, 130, 246, 0.35);
++}
++
++.ui-material-sphere-wrapper {
++  position: relative;
++  width: 52px;
++  height: 52px;
++  display: flex;
++  align-items: center;
++  justify-content: center;
++}
++
++.ui-material-sphere-img {
++  width: 48px;
++  height: 48px;
++  border-radius: 50%;
++  object-fit: cover;
++  filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.4));
++  transition: transform 0.18s ease;
++}
++
++.ui-material-card:hover .ui-material-sphere-img {
++  transform: scale(1.06);
++}
++
++.ui-material-sphere-placeholder {
++  width: 48px;
++  height: 48px;
++  border-radius: 50%;
++  background: #475569;
++}
++
++.ui-material-check {
++  position: absolute;
++  bottom: 0;
++  right: 0;
++  background: #3b82f6;
++  color: #ffffff;
++  font-size: 10px;
++  font-weight: bold;
++  width: 16px;
++  height: 16px;
++  border-radius: 50%;
++  display: flex;
++  align-items: center;
++  justify-content: center;
++  border: 1.5px solid #1e293b;
++}
++
++.ui-material-name {
++  font-size: 11px;
++  font-weight: 500;
++  text-align: center;
++  line-height: 1.2;
++  max-width: 100%;
++  overflow: hidden;
++  text-overflow: ellipsis;
++  white-space: nowrap;
+ }
+diff --git a/src/ui/UIOverlay.tsx b/src/ui/UIOverlay.tsx
+index 89e88a9..72420af 100644
+--- a/src/ui/UIOverlay.tsx
++++ b/src/ui/UIOverlay.tsx
+@@ -1,4 +1,4 @@
+-import React, { useEffect, useReducer } from 'react';
++import React, { useEffect, useReducer, useState } from 'react';
+ import type {
+   ToolMode,
+   WallToolComponent,
+@@ -6,7 +6,11 @@ import type {
+ import type { RoomComponent, RoomInfo } from '../components/RoomComponent';
+ import type { WallMesh } from '../objects/WallMesh';
+ import type { Opening } from '../objects/openings/Opening';
++import { WindowMesh } from '../objects/openings/WindowMesh';
++import { DoorMesh } from '../objects/openings/DoorMesh';
+ import { OPENING_LABELS, isGroundedOpeningType } from '../types/Opening';
++import { CollapsibleSection } from './CollapsibleSection';
++import { MaterialPicker } from './MaterialPicker';
+ import './UIOverlay.css';
+ 
+ interface UIOverlayProps {
+@@ -41,46 +45,51 @@ interface RoomPanelProps {
+ }
+ 
+ const RoomPanel: React.FC<RoomPanelProps> = ({ roomTool }) => {
++  const [isOpen, setIsOpen] = useState(false);
+   const rooms = roomTool.rooms;
+ 
+   return (
+     <div className="ui-inspector">
+-      <h3 className="ui-section-title">Rooms ({rooms.length})</h3>
+-
+-      <div className="ui-mode-toggle">
+-        <button
+-          type="button"
+-          className={`ui-btn ${roomTool.showFloors ? 'active' : ''}`}
+-          onClick={() => roomTool.toggleFloors()}
+-        >
+-          🟦 Floors
+-        </button>
+-        <button
+-          type="button"
+-          className={`ui-btn ${roomTool.showLabels ? 'active' : ''}`}
+-          onClick={() => roomTool.toggleLabels()}
+-        >
+-          🏷️ Labels
+-        </button>
+-      </div>
+-
+-      {rooms.length === 0 ? (
+-        <div className="ui-instruction">
+-          No rooms yet. Close a region with walls and it is detected
+-          automatically.
++      <CollapsibleSection
++        title={`Rooms (${rooms.length})`}
++        isOpen={isOpen}
++        onToggle={() => setIsOpen(!isOpen)}
++        icon="🏠"
++      >
++        <div className="ui-mode-toggle" style={{ marginTop: '8px' }}>
++          <button
++            type="button"
++            className={`ui-btn ${roomTool.showFloors ? 'active' : ''}`}
++            onClick={() => roomTool.toggleFloors()}
++          >
++            🟦 Floors
++          </button>
++          <button
++            type="button"
++            className={`ui-btn ${roomTool.showLabels ? 'active' : ''}`}
++            onClick={() => roomTool.toggleLabels()}
++          >
++            🏷️ Labels
++          </button>
+         </div>
+-      ) : (
+-        <ul className="ui-list">
+-          {rooms.map((room) => (
+-            <li key={room.id} className="ui-list-item">
+-              <span>{room.name}</span>
+-              <span>
+-                {room.area.toFixed(2)} m² · {room.walls.length} walls
+-              </span>
+-            </li>
+-          ))}
+-        </ul>
+-      )}
++
++        {rooms.length === 0 ? (
++          <div className="ui-instruction" style={{ marginTop: '8px' }}>
++            No rooms yet. Close a region with walls and it is detected automatically.
++          </div>
++        ) : (
++          <ul className="ui-list" style={{ marginTop: '8px' }}>
++            {rooms.map((room) => (
++              <li key={room.id} className="ui-list-item">
++                <span>{room.name}</span>
++                <span>
++                  {room.area.toFixed(2)} m² · {room.walls.length} walls
++                </span>
++              </li>
++            ))}
++          </ul>
++        )}
++      </CollapsibleSection>
+     </div>
+   );
+ };
+@@ -95,119 +104,159 @@ const WallInspector: React.FC<WallInspectorProps> = ({
+   wallTool,
+   wall,
+   rooms,
+-}) => (
+-  <div className="ui-inspector">
+-    <h3 className="ui-section-title">Selected Wall Details</h3>
+-
+-    <button
+-      type="button"
+-      className={`ui-btn ${wallTool.resizeMode ? 'active' : ''}`}
+-      onClick={() => wallTool.toggleResizeMode()}
+-    >
+-      {wallTool.resizeMode ? '✋ Stop Resize' : '↔️ Resize Wall'}
+-    </button>
+-
+-    {wallTool.resizeMode && (
+-      <div className="ui-instruction">
+-        Click an end node to open the gumball, click the gumball arrow to start
+-        resize, move the mouse, then click once to finish.
+-      </div>
+-    )}
+-
+-    {wallTool.resizeError && (
+-      <div className="ui-error-text">{wallTool.resizeError}</div>
+-    )}
+-
+-    <div className="ui-field">
+-      <label htmlFor="wall-height">Height (m):</label>
+-      <input
+-        id="wall-height"
+-        type="number"
+-        step="0.1"
+-        min="0.1"
+-        max="20"
+-        value={wall.height}
+-        onChange={(event) => {
+-          const value = parsePositive(event.target.value);
+-          if (value !== null) {
+-            wallTool.setSelectedWallHeight(value);
+-          }
+-        }}
+-      />
+-    </div>
++}) => {
++  const [dimensionsOpen, setDimensionsOpen] = useState(true);
++  const [materialsOpen, setMaterialsOpen] = useState(true);
++  const [openingsOpen, setOpeningsOpen] = useState(true);
+ 
+-    <div className="ui-field">
+-      <label htmlFor="wall-width">Width / Thickness (m):</label>
+-      <input
+-        id="wall-width"
+-        type="number"
+-        step="0.05"
+-        min="0.05"
+-        max="5"
+-        value={wall.width}
+-        onChange={(event) => {
+-          const value = parsePositive(event.target.value);
+-          if (value !== null) {
+-            wallTool.setSelectedWallWidth(value);
+-          }
+-        }}
+-      />
+-    </div>
++  return (
++    <div className="ui-inspector">
++      <h3 className="ui-section-title">Selected Wall Details</h3>
++
++      {/* Dimensions & Properties Section */}
++      <CollapsibleSection
++        title="Dimensions & Properties"
++        isOpen={dimensionsOpen}
++        onToggle={() => setDimensionsOpen(!dimensionsOpen)}
++        icon="📐"
++      >
++        <button
++          type="button"
++          className={`ui-btn ${wallTool.resizeMode ? 'active' : ''}`}
++          onClick={() => wallTool.toggleResizeMode()}
++          style={{ width: '100%', marginBottom: '8px' }}
++        >
++          {wallTool.resizeMode ? '✋ Stop Resize' : '↔️ Resize Wall'}
++        </button>
+ 
+-    <div className="ui-field-readonly">
+-      <span>Length:</span>
+-      <strong>{wall.getLength().toFixed(2)} m</strong>
+-    </div>
++        {wallTool.resizeMode && (
++          <div className="ui-instruction">
++            Click an end node to open the gumball, click the gumball arrow to start
++            resize, move the mouse, then click once to finish.
++          </div>
++        )}
+ 
+-    <div className="ui-field-readonly">
+-      <span>Orientation:</span>
+-      <strong>{wall.getOrientation().toUpperCase()}-axis</strong>
+-    </div>
++        {wallTool.resizeError && (
++          <div className="ui-error-text">{wallTool.resizeError}</div>
++        )}
+ 
+-    <div className="ui-field-readonly">
+-      <span>Openings:</span>
+-      <strong>{wall.openings.length}</strong>
+-    </div>
++        <div className="ui-field">
++          <label htmlFor="wall-height">Height (m):</label>
++          <input
++            id="wall-height"
++            type="number"
++            step="0.1"
++            min="0.1"
++            max="20"
++            value={wall.height}
++            onChange={(event) => {
++              const value = parsePositive(event.target.value);
++              if (value !== null) {
++                wallTool.setSelectedWallHeight(value);
++              }
++            }}
++          />
++        </div>
+ 
+-    <div className="ui-field-readonly">
+-      <span>Bounds rooms:</span>
+-      <strong>
+-        {rooms.length === 0
+-          ? 'None'
+-          : rooms.map((room) => room.name).join(', ')}
+-      </strong>
+-    </div>
++        <div className="ui-field">
++          <label htmlFor="wall-width">Width / Thickness (m):</label>
++          <input
++            id="wall-width"
++            type="number"
++            step="0.05"
++            min="0.05"
++            max="5"
++            value={wall.width}
++            onChange={(event) => {
++              const value = parsePositive(event.target.value);
++              if (value !== null) {
++                wallTool.setSelectedWallWidth(value);
++              }
++            }}
++          />
++        </div>
+ 
+-    {wall.openings.length > 0 && (
+-      <ul className="ui-list">
+-        {wall.openings.map((opening) => (
+-          <li key={opening.meshId} className="ui-list-item">
+-            <span>
+-              {OPENING_ICONS[opening.type]} {OPENING_LABELS[opening.type]} @{' '}
+-              {opening.distanceAlongWall.toFixed(2)} m
+-            </span>
+-            <button
+-              type="button"
+-              className="ui-icon-btn"
+-              title="Remove this opening"
+-              onClick={() => wallTool.deleteOpening(opening)}
+-            >
+-              ✕
+-            </button>
+-          </li>
+-        ))}
+-      </ul>
+-    )}
+-
+-    <button
+-      type="button"
+-      className="ui-btn ui-btn-danger"
+-      onClick={() => wallTool.deleteSelectedWall()}
+-    >
+-      🗑️ Delete Wall
+-    </button>
+-  </div>
+-);
++        <div className="ui-field-readonly">
++          <span>Length:</span>
++          <strong>{wall.getLength().toFixed(2)} m</strong>
++        </div>
++
++        <div className="ui-field-readonly">
++          <span>Orientation:</span>
++          <strong>{wall.getOrientation().toUpperCase()}-axis</strong>
++        </div>
++
++        <div className="ui-field-readonly">
++          <span>Bounds rooms:</span>
++          <strong>
++            {rooms.length === 0
++              ? 'None'
++              : rooms.map((room) => room.name).join(', ')}
++          </strong>
++        </div>
++
++        <button
++          type="button"
++          className="ui-btn ui-btn-danger"
++          onClick={() => wallTool.deleteSelectedWall()}
++          style={{ width: '100%' }}
++        >
++          🗑️ Delete Wall
++        </button>
++      </CollapsibleSection>
++
++      {/* Materials Section */}
++      <CollapsibleSection
++        title="Wall Materials"
++        isOpen={materialsOpen}
++        onToggle={() => setMaterialsOpen(!materialsOpen)}
++        icon="🎨"
++      >
++        <MaterialPicker
++          title="Wall Finish"
++          currentMaterialId={wall.getCustomMaterialId() ?? 'wall-plaster'}
++          allowedCategories={['wall', 'concrete', 'wood', 'tiles']}
++          onSelectMaterial={(material, materialId) => {
++            wallTool.setSelectedWallMaterial(material, materialId);
++          }}
++          onPreviewMaterial={(material) => {
++            wallTool.previewWallMaterial(material);
++          }}
++        />
++      </CollapsibleSection>
++
++      {/* Openings Section */}
++      {wall.openings.length > 0 && (
++        <CollapsibleSection
++          title={`Wall Openings (${wall.openings.length})`}
++          isOpen={openingsOpen}
++          onToggle={() => setOpeningsOpen(!openingsOpen)}
++          icon="🚪"
++          badge={wall.openings.length}
++        >
++          <ul className="ui-list">
++            {wall.openings.map((opening) => (
++              <li key={opening.meshId} className="ui-list-item">
++                <span>
++                  {OPENING_ICONS[opening.type]} {OPENING_LABELS[opening.type]} @{' '}
++                  {opening.distanceAlongWall.toFixed(2)} m
++                </span>
++                <button
++                  type="button"
++                  className="ui-icon-btn"
++                  title="Remove this opening"
++                  onClick={() => wallTool.deleteOpening(opening)}
++                >
++                  ✕
++                </button>
++              </li>
++            ))}
++          </ul>
++        </CollapsibleSection>
 +      )}
 +    </div>
 +  );
 +};
-+
- interface WallInspectorProps {
+ 
+ interface OpeningInspectorProps {
    wallTool: WallToolComponent;
-   wall: WallMesh;
-+  rooms: RoomInfo[];
- }
- 
--const WallInspector: React.FC<WallInspectorProps> = ({ wallTool, wall }) => (
-+const WallInspector: React.FC<WallInspectorProps> = ({
-+  wallTool,
-+  wall,
-+  rooms,
-+}) => (
-   <div className="ui-inspector">
-     <h3 className="ui-section-title">Selected Wall Details</h3>
- 
-@@ -113,6 +169,15 @@ const WallInspector: React.FC<WallInspectorProps> = ({ wallTool, wall }) => (
-       <strong>{wall.openings.length}</strong>
-     </div>
- 
-+    <div className="ui-field-readonly">
-+      <span>Bounds rooms:</span>
-+      <strong>
-+        {rooms.length === 0
-+          ? 'None'
-+          : rooms.map((room) => room.name).join(', ')}
-+      </strong>
-+    </div>
+@@ -220,96 +269,179 @@ const OpeningInspector: React.FC<OpeningInspectorProps> = ({
+ }) => {
+   const label = OPENING_LABELS[opening.type];
+   const wallLength = opening.wall?.getLength() ?? 0;
++  const isWindow = opening instanceof WindowMesh;
++  const isDoor = opening instanceof DoorMesh;
 +
-     {wall.openings.length > 0 && (
-       <ul className="ui-list">
-         {wall.openings.map((opening) => (
-@@ -249,7 +314,7 @@ const OpeningInspector: React.FC<OpeningInspectorProps> = ({
++  const [dimensionsOpen, setDimensionsOpen] = useState(true);
++  const [glassMaterialOpen, setGlassMaterialOpen] = useState(true);
++  const [leafMaterialOpen, setLeafMaterialOpen] = useState(true);
++  const [frameMaterialOpen, setFrameMaterialOpen] = useState(false);
+ 
+   return (
+     <div className="ui-inspector">
+       <h3 className="ui-section-title">Selected {label} Details</h3>
+ 
+-      <div className="ui-field">
+-        <label htmlFor="opening-width">Width (m):</label>
+-        <input
+-          id="opening-width"
+-          type="number"
+-          step="0.05"
+-          min="0.1"
+-          max="10"
+-          value={opening.width}
+-          onChange={(event) => {
+-            const value = parsePositive(event.target.value);
+-            if (value !== null) {
+-              wallTool.setSelectedOpeningWidth(value);
+-            }
+-          }}
+-        />
+-      </div>
++      {/* Dimensions & Placement Section */}
++      <CollapsibleSection
++        title="Dimensions & Placement"
++        isOpen={dimensionsOpen}
++        onToggle={() => setDimensionsOpen(!dimensionsOpen)}
++        icon="📐"
++      >
++        <div className="ui-field">
++          <label htmlFor="opening-width">Width (m):</label>
++          <input
++            id="opening-width"
++            type="number"
++            step="0.05"
++            min="0.1"
++            max="10"
++            value={opening.width}
++            onChange={(event) => {
++              const value = parsePositive(event.target.value);
++              if (value !== null) {
++                wallTool.setSelectedOpeningWidth(value);
++              }
++            }}
++          />
++        </div>
+ 
+-      <div className="ui-field">
+-        <label htmlFor="opening-height">Height (m):</label>
+-        <input
+-          id="opening-height"
+-          type="number"
+-          step="0.05"
+-          min="0.1"
+-          max="10"
+-          value={opening.height}
+-          onChange={(event) => {
+-            const value = parsePositive(event.target.value);
+-            if (value !== null) {
+-              wallTool.setSelectedOpeningHeight(value);
+-            }
+-          }}
+-        />
+-      </div>
++        <div className="ui-field">
++          <label htmlFor="opening-height">Height (m):</label>
++          <input
++            id="opening-height"
++            type="number"
++            step="0.05"
++            min="0.1"
++            max="10"
++            value={opening.height}
++            onChange={(event) => {
++              const value = parsePositive(event.target.value);
++              if (value !== null) {
++                wallTool.setSelectedOpeningHeight(value);
++              }
++            }}
++          />
++        </div>
++
++        {!isGroundedOpeningType(opening.type) && (
++          <div className="ui-field">
++            <label htmlFor="opening-sill">Sill Height (m):</label>
++            <input
++              id="opening-sill"
++              type="number"
++              step="0.05"
++              min="0"
++              max="10"
++              value={opening.sillHeight}
++              onChange={(event) => {
++                const value = parseNonNegative(event.target.value);
++                if (value !== null) {
++                  wallTool.setSelectedOpeningSillHeight(value);
++                }
++              }}
++            />
++          </div>
++        )}
+ 
+-      {!isGroundedOpeningType(opening.type) && (
+         <div className="ui-field">
+-          <label htmlFor="opening-sill">Sill Height (m):</label>
++          <label htmlFor="opening-distance">Position Along Wall (m):</label>
+           <input
+-            id="opening-sill"
++            id="opening-distance"
+             type="number"
+             step="0.05"
+             min="0"
+-            max="10"
+-            value={opening.sillHeight}
++            max={wallLength}
++            value={opening.distanceAlongWall}
+             onChange={(event) => {
+               const value = parseNonNegative(event.target.value);
+               if (value !== null) {
+-                wallTool.setSelectedOpeningSillHeight(value);
++                wallTool.setSelectedOpeningDistance(value);
+               }
+             }}
+           />
+         </div>
+-      )}
+ 
+-      <div className="ui-field">
+-        <label htmlFor="opening-distance">Position Along Wall (m):</label>
+-        <input
+-          id="opening-distance"
+-          type="number"
+-          step="0.05"
+-          min="0"
+-          max={wallLength}
+-          value={opening.distanceAlongWall}
+-          onChange={(event) => {
+-            const value = parseNonNegative(event.target.value);
+-            if (value !== null) {
+-              wallTool.setSelectedOpeningDistance(value);
+-            }
+-          }}
+-        />
+-      </div>
++        {wallTool.openingEditError && (
++          <div className="ui-error-text">{wallTool.openingEditError}</div>
++        )}
++
++        <button
++          type="button"
++          className="ui-btn ui-btn-danger"
++          onClick={() => wallTool.deleteSelectedOpening()}
++          style={{ width: '100%' }}
++        >
++          🗑️ Delete {label}
++        </button>
++      </CollapsibleSection>
++
++      {/* Window Glass Material Section */}
++      {isWindow && (
++        <CollapsibleSection
++          title="Glass Material"
++          isOpen={glassMaterialOpen}
++          onToggle={() => setGlassMaterialOpen(!glassMaterialOpen)}
++          icon="🪟"
++        >
++          <MaterialPicker
++            title="Physical Glass"
++            currentMaterialId={(opening as WindowMesh).glassMaterialId}
++            allowedCategories={['glass']}
++            onSelectMaterial={(material, materialId) => {
++              wallTool.setSelectedOpeningGlassMaterial(material, materialId);
++            }}
++            onPreviewMaterial={(material) => {
++              wallTool.previewOpeningGlassMaterial(material);
++            }}
++          />
++        </CollapsibleSection>
++      )}
+ 
+-      {wallTool.openingEditError && (
+-        <div className="ui-error-text">{wallTool.openingEditError}</div>
++      {/* Door Leaf Material Section */}
++      {isDoor && (
++        <CollapsibleSection
++          title="Door Leaf Material"
++          isOpen={leafMaterialOpen}
++          onToggle={() => setLeafMaterialOpen(!leafMaterialOpen)}
++          icon="🚪"
++        >
++          <MaterialPicker
++            title="Leaf Surface"
++            currentMaterialId={(opening as DoorMesh).leafMaterialId}
++            allowedCategories={['wood', 'metal']}
++            onSelectMaterial={(material, materialId) => {
++              wallTool.setSelectedOpeningLeafMaterial(material, materialId);
++            }}
++            onPreviewMaterial={(material) => {
++              wallTool.previewOpeningLeafMaterial(material);
++            }}
++          />
++        </CollapsibleSection>
+       )}
+ 
+-      <button
+-        type="button"
+-        className="ui-btn ui-btn-danger"
+-        onClick={() => wallTool.deleteSelectedOpening()}
+-      >
+-        🗑️ Delete {label}
+-      </button>
++      {/* Frame Material Section */}
++      {(isWindow || isDoor) && (
++        <CollapsibleSection
++          title="Frame Material"
++          isOpen={frameMaterialOpen}
++          onToggle={() => setFrameMaterialOpen(!frameMaterialOpen)}
++          icon="🖼️"
++        >
++          <MaterialPicker
++            title="Frame Finish"
++            currentMaterialId={
++              isWindow
++                ? (opening as WindowMesh).frameMaterialId
++                : (opening as DoorMesh).frameMaterialId
++            }
++            allowedCategories={['wood', 'metal']}
++            onSelectMaterial={(material, materialId) => {
++              wallTool.setSelectedOpeningFrameMaterial(material, materialId);
++            }}
++          />
++        </CollapsibleSection>
++      )}
+     </div>
    );
  };
- 
--export const UIOverlay: React.FC<UIOverlayProps> = ({ wallTool }) => {
-+export const UIOverlay: React.FC<UIOverlayProps> = ({ wallTool, roomTool }) => {
-   const [, forceUpdate] = useReducer((x) => x + 1, 0);
- 
-   useEffect(() => {
-@@ -264,6 +329,18 @@ export const UIOverlay: React.FC<UIOverlayProps> = ({ wallTool }) => {
-     };
-   }, [wallTool]);
- 
-+  useEffect(() => {
-+    if (!roomTool) return;
-+
-+    const unsubscribe = roomTool.subscribe(() => {
-+      forceUpdate();
-+    });
-+
-+    return () => {
-+      unsubscribe();
-+    };
-+  }, [roomTool]);
-+
-   if (!wallTool) {
-     return null;
-   }
-@@ -344,9 +421,16 @@ export const UIOverlay: React.FC<UIOverlayProps> = ({ wallTool }) => {
-           )}
-         </div>
- 
-+        {/* Detected rooms */}
-+        {roomTool && <RoomPanel roomTool={roomTool} />}
-+
-         {/* Inspectors */}
-         {isSelect && selectedWall && (
--          <WallInspector wallTool={wallTool} wall={selectedWall} />
-+          <WallInspector
-+            wallTool={wallTool}
-+            wall={selectedWall}
-+            rooms={roomTool?.getRoomsForWall(selectedWall) ?? []}
-+          />
-         )}
- 
-         {isSelect && selectedOpening && (
-diff --git a/src/utils/roomDetection.ts b/src/utils/roomDetection.ts
-new file mode 100644
-index 0000000..f8cd788
---- /dev/null
-+++ b/src/utils/roomDetection.ts
-@@ -0,0 +1,726 @@
-+import type {
-+  DetectedRoom,
-+  RoomBounds,
-+  RoomPoint,
-+  RoomWallLike,
-+} from '../types/Room';
-+
-+/**
-+ * Room detection.
-+ *
-+ * The walls are turned into a planar graph of their centre lines and every
-+ * minimal cycle (face) of that graph becomes a room:
-+ *
-+ *   1. Each wall becomes an axis aligned segment.
-+ *   2. Segments that meet - either end to end, or as a T where one wall runs
-+ *      into the side of another - get a shared node. Because the placement
-+ *      tools snap walls to each other's faces, centre lines usually stop half
-+ *      a wall thickness short of each other, so "meeting" is measured with a
-+ *      tolerance derived from the wall thickness.
-+ *   3. Every wall is split at the nodes that lie on it, which is what lets a
-+ *      single wall act as a boundary for the rooms on both of its sides.
-+ *   4. Dangling chains (walls that do not close anything) are pruned.
-+ *   5. The remaining graph is traversed face by face. Traversing the "next
-+ *      edge clockwise" at every node yields the minimal faces only, so an
-+ *      outer boundary that contains several smaller spaces never shows up as
-+ *      a room of its own - only the actual spaces do.
-+ *
-+ * Doors and windows are deliberately ignored: they are cut into a wall but
-+ * never divide it, so a wall with openings keeps bounding its rooms.
-+ */
-+
-+/** Extra slack (m) on top of half a wall thickness when joining centre lines. */
-+const JOIN_EPS = 0.05;
-+
-+/** Walls shorter than this (m) cannot contribute a meaningful boundary. */
-+const MIN_SEGMENT_LENGTH = 0.02;
-+
-+/** Faces smaller than this (m²) are numerical noise rather than rooms. */
-+const MIN_ROOM_AREA = 0.02;
-+
-+/** Two directions are treated as parallel below this cross product. */
-+const PARALLEL_EPS = 1e-6;
-+
-+/** Room ids are built from millimetre precision coordinates. */
-+const SIGNATURE_PRECISION = 1000;
-+
-+type Orientation = 'x' | 'z';
-+
-+interface Segment<TWall extends RoomWallLike> {
-+  wall: TWall;
-+  orientation: Orientation;
-+  /** Fixed coordinate: z for x-oriented walls, x for z-oriented walls. */
-+  axisPos: number;
-+  min: number;
-+  max: number;
-+  width: number;
-+}
-+
-+/** A point that wants to become (or join) a graph node. */
-+interface Candidate {
-+  segment: number;
-+  /** Coordinate along the owning segment's axis. */
-+  t: number;
-+  x: number;
-+  z: number;
-+  /** How far away another candidate may sit and still be the same node. */
-+  radius: number;
-+}
-+
-+interface GraphEdge<TWall extends RoomWallLike> {
-+  a: number;
-+  b: number;
-+  wall: TWall;
-+  width: number;
-+}
-+
-+interface Dart {
-+  from: number;
-+  to: number;
-+  edge: number;
-+}
-+
-+// --------------------------------
-+// Polygon helpers
-+// --------------------------------
-+
-+/**
-+ * Shoelace area of a loop in the XZ plane.
-+ *
-+ * Positive means the loop is wound the same way as the interior faces
-+ * produced by the traversal below.
-+ */
-+export function signedArea(points: readonly RoomPoint[]): number {
-+  let sum = 0;
-+
-+  for (let i = 0; i < points.length; i++) {
-+    const a = points[i];
-+    const b = points[(i + 1) % points.length];
-+    sum += a.x * b.z - b.x * a.z;
-+  }
-+
-+  return sum / 2;
-+}
-+
-+function polygonPerimeter(points: readonly RoomPoint[]): number {
-+  let sum = 0;
-+
-+  for (let i = 0; i < points.length; i++) {
-+    const a = points[i];
-+    const b = points[(i + 1) % points.length];
-+    sum += Math.hypot(b.x - a.x, b.z - a.z);
-+  }
-+
-+  return sum;
-+}
-+
-+function polygonBounds(points: readonly RoomPoint[]): RoomBounds {
-+  let minX = Infinity;
-+  let maxX = -Infinity;
-+  let minZ = Infinity;
-+  let maxZ = -Infinity;
-+
-+  for (const point of points) {
-+    minX = Math.min(minX, point.x);
-+    maxX = Math.max(maxX, point.x);
-+    minZ = Math.min(minZ, point.z);
-+    maxZ = Math.max(maxZ, point.z);
-+  }
-+
-+  return { minX, maxX, minZ, maxZ };
-+}
-+
-+function polygonCenter(points: readonly RoomPoint[]): RoomPoint {
-+  const area = signedArea(points);
-+  const bounds = polygonBounds(points);
-+
-+  if (Math.abs(area) < 1e-9) {
-+    return {
-+      x: (bounds.minX + bounds.maxX) / 2,
-+      z: (bounds.minZ + bounds.maxZ) / 2,
-+    };
-+  }
-+
-+  let cx = 0;
-+  let cz = 0;
-+
-+  for (let i = 0; i < points.length; i++) {
-+    const a = points[i];
-+    const b = points[(i + 1) % points.length];
-+    const cross = a.x * b.z - b.x * a.z;
-+    cx += (a.x + b.x) * cross;
-+    cz += (a.z + b.z) * cross;
-+  }
-+
-+  return { x: cx / (6 * area), z: cz / (6 * area) };
-+}
-+
-+/**
-+ * Moves every edge of a counter clockwise loop inwards by half of the
-+ * thickness of the wall that carries it, so the floor stops at the inner wall
-+ * faces instead of the centre lines.
-+ *
-+ * Returns null when the result would be degenerate (a room smaller than the
-+ * walls around it), in which case the caller falls back to the centre lines.
-+ */
-+function insetPolygon(
-+  points: readonly RoomPoint[],
-+  widths: readonly number[],
-+): RoomPoint[] | null {
-+  const count = points.length;
-+
-+  if (count < 3) {
-+    return null;
-+  }
-+
-+  const lines: { px: number; pz: number; dx: number; dz: number }[] = [];
-+
-+  for (let i = 0; i < count; i++) {
-+    const a = points[i];
-+    const b = points[(i + 1) % count];
-+
-+    const rawX = b.x - a.x;
-+    const rawZ = b.z - a.z;
-+    const length = Math.hypot(rawX, rawZ);
-+
-+    if (length < 1e-9) {
-+      return null;
-+    }
-+
-+    const dx = rawX / length;
-+    const dz = rawZ / length;
-+    const offset = widths[i] / 2;
-+
-+    // For a counter clockwise loop the interior is on the left of each edge.
-+    lines.push({
-+      px: a.x - dz * offset,
-+      pz: a.z + dx * offset,
-+      dx,
-+      dz,
-+    });
-+  }
-+
-+  const result: RoomPoint[] = [];
-+
-+  for (let i = 0; i < count; i++) {
-+    const prev = lines[(i - 1 + count) % count];
-+    const cur = lines[i];
-+    const cross = prev.dx * cur.dz - prev.dz * cur.dx;
-+
-+    if (Math.abs(cross) < PARALLEL_EPS) {
-+      // Collinear neighbours (a wall split by a T-junction on the far side).
-+      result.push({ x: cur.px, z: cur.pz });
-+      continue;
-+    }
-+
-+    const t =
-+      ((cur.px - prev.px) * cur.dz - (cur.pz - prev.pz) * cur.dx) / cross;
-+
-+    result.push({ x: prev.px + prev.dx * t, z: prev.pz + prev.dz * t });
-+  }
-+
-+  // Reject inversions: a shrunk edge must still run the same way as before.
-+  for (let i = 0; i < count; i++) {
-+    const a = points[i];
-+    const b = points[(i + 1) % count];
-+    const ia = result[i];
-+    const ib = result[(i + 1) % count];
-+
-+    const dot =
-+      (b.x - a.x) * (ib.x - ia.x) + (b.z - a.z) * (ib.z - ia.z);
-+
-+    if (dot <= 0) {
-+      return null;
-+    }
-+  }
-+
-+  return signedArea(result) > MIN_ROOM_AREA ? result : null;
-+}
-+
-+function roomSignature(points: readonly RoomPoint[]): string {
-+  const keys = points.map((point) => {
-+    const x = Math.round(point.x * SIGNATURE_PRECISION);
-+    const z = Math.round(point.z * SIGNATURE_PRECISION);
-+    return `${x}:${z}`;
-+  });
-+
-+  // Sorting makes the id independent of where the traversal started.
-+  keys.sort();
-+
-+  return keys.join('|');
-+}
-+
-+// --------------------------------
-+// Graph construction
-+// --------------------------------
-+
-+function toSegments<TWall extends RoomWallLike>(
-+  walls: Iterable<TWall>,
-+): Segment<TWall>[] {
-+  const segments: Segment<TWall>[] = [];
-+
-+  for (const wall of walls) {
-+    const start = wall.startPoint;
-+    const end = wall.endPoint;
-+
-+    const dx = Math.abs(end.x - start.x);
-+    const dz = Math.abs(end.z - start.z);
-+
-+    // Matches WallMesh.getOrientation(): walls are always axis aligned.
-+    const orientation: Orientation = dx >= dz ? 'x' : 'z';
-+    const width = Math.max(wall.width, 0.01);
-+
-+    if (orientation === 'x') {
-+      const min = Math.min(start.x, end.x);
-+      const max = Math.max(start.x, end.x);
-+
-+      if (max - min < MIN_SEGMENT_LENGTH) continue;
-+
-+      segments.push({
-+        wall,
-+        orientation,
-+        axisPos: start.z,
-+        min,
-+        max,
-+        width,
-+      });
-+    } else {
-+      const min = Math.min(start.z, end.z);
-+      const max = Math.max(start.z, end.z);
-+
-+      if (max - min < MIN_SEGMENT_LENGTH) continue;
-+
-+      segments.push({
-+        wall,
-+        orientation,
-+        axisPos: start.x,
-+        min,
-+        max,
-+        width,
-+      });
-+    }
-+  }
-+
-+  return segments;
-+}
-+
-+function pointOnSegment<TWall extends RoomWallLike>(
-+  segment: Segment<TWall>,
-+  t: number,
-+): RoomPoint {
-+  return segment.orientation === 'x'
-+    ? { x: t, z: segment.axisPos }
-+    : { x: segment.axisPos, z: t };
-+}
-+
-+function collectCandidates<TWall extends RoomWallLike>(
-+  segments: Segment<TWall>[],
-+): Candidate[] {
-+  const candidates: Candidate[] = [];
-+
-+  const push = (segment: number, t: number, point: RoomPoint): void => {
-+    candidates.push({
-+      segment,
-+      t,
-+      x: point.x,
-+      z: point.z,
-+      radius: segments[segment].width / 2 + JOIN_EPS,
-+    });
-+  };
-+
-+  for (let i = 0; i < segments.length; i++) {
-+    const segment = segments[i];
-+    push(i, segment.min, pointOnSegment(segment, segment.min));
-+    push(i, segment.max, pointOnSegment(segment, segment.max));
-+  }
-+
-+  for (let i = 0; i < segments.length; i++) {
-+    for (let j = i + 1; j < segments.length; j++) {
-+      const first = segments[i];
-+      const second = segments[j];
-+
-+      if (first.orientation === second.orientation) {
-+        // Collinear neighbours are joined through their endpoints instead.
-+        continue;
-+      }
-+
-+      const xIndex = first.orientation === 'x' ? i : j;
-+      const zIndex = first.orientation === 'x' ? j : i;
-+      const xSegment = segments[xIndex];
-+      const zSegment = segments[zIndex];
-+
-+      const crossX = zSegment.axisPos;
-+      const crossZ = xSegment.axisPos;
-+
-+      // A wall that was snapped against another one stops at its face, so its
-+      // centre line falls short of the other centre line by half a thickness.
-+      const xSlack = zSegment.width / 2 + JOIN_EPS;
-+      const zSlack = xSegment.width / 2 + JOIN_EPS;
-+
-+      const touchesAlongX =
-+        crossX >= xSegment.min - xSlack && crossX <= xSegment.max + xSlack;
-+      const touchesAlongZ =
-+        crossZ >= zSegment.min - zSlack && crossZ <= zSegment.max + zSlack;
-+
-+      if (!touchesAlongX || !touchesAlongZ) {
-+        continue;
-+      }
-+
-+      const point: RoomPoint = { x: crossX, z: crossZ };
-+
-+      push(xIndex, crossX, point);
-+      push(zIndex, crossZ, point);
-+    }
-+  }
-+
-+  return candidates;
-+}
-+
-+/**
-+ * Merges candidates that describe the same physical corner into one node.
-+ */
-+function clusterCandidates(candidates: Candidate[]): {
-+  roots: number[];
-+  positions: Map<number, RoomPoint>;
-+} {
-+  const parent = candidates.map((_, index) => index);
-+
-+  const find = (index: number): number => {
-+    let root = index;
-+    while (parent[root] !== root) {
-+      root = parent[root];
-+    }
-+
-+    let walk = index;
-+    while (parent[walk] !== root) {
-+      const next = parent[walk];
-+      parent[walk] = root;
-+      walk = next;
-+    }
-+
-+    return root;
-+  };
-+
-+  const union = (a: number, b: number): void => {
-+    const rootA = find(a);
-+    const rootB = find(b);
-+
-+    if (rootA !== rootB) {
-+      parent[rootB] = rootA;
-+    }
-+  };
-+
-+  for (let i = 0; i < candidates.length; i++) {
-+    for (let j = i + 1; j < candidates.length; j++) {
-+      const a = candidates[i];
-+      const b = candidates[j];
-+      const tolerance = Math.max(a.radius, b.radius);
-+
-+      if (Math.hypot(a.x - b.x, a.z - b.z) <= tolerance) {
-+        union(i, j);
-+      }
-+    }
-+  }
-+
-+  const sums = new Map<number, { x: number; z: number; count: number }>();
-+  const roots = candidates.map((_, index) => find(index));
-+
-+  for (let i = 0; i < candidates.length; i++) {
-+    const root = roots[i];
-+    const entry = sums.get(root) ?? { x: 0, z: 0, count: 0 };
-+    entry.x += candidates[i].x;
-+    entry.z += candidates[i].z;
-+    entry.count += 1;
-+    sums.set(root, entry);
-+  }
-+
-+  const positions = new Map<number, RoomPoint>();
-+
-+  for (const [root, entry] of sums) {
-+    positions.set(root, { x: entry.x / entry.count, z: entry.z / entry.count });
-+  }
-+
-+  return { roots, positions };
-+}
-+
-+function buildEdges<TWall extends RoomWallLike>(
-+  segments: Segment<TWall>[],
-+  candidates: Candidate[],
-+  nodeOfCandidate: number[],
-+): GraphEdge<TWall>[] {
-+  const bySegment = new Map<number, number[]>();
-+
-+  for (let i = 0; i < candidates.length; i++) {
-+    const list = bySegment.get(candidates[i].segment);
-+
-+    if (list) {
-+      list.push(i);
-+    } else {
-+      bySegment.set(candidates[i].segment, [i]);
-+    }
-+  }
-+
-+  const edges: GraphEdge<TWall>[] = [];
-+  const seen = new Map<string, number>();
-+
-+  for (const [segmentIndex, indices] of bySegment) {
-+    const segment = segments[segmentIndex];
-+
-+    indices.sort((a, b) => candidates[a].t - candidates[b].t);
-+
-+    const chain: number[] = [];
-+
-+    for (const index of indices) {
-+      const node = nodeOfCandidate[index];
-+
-+      if (chain[chain.length - 1] !== node) {
-+        chain.push(node);
-+      }
-+    }
-+
-+    for (let i = 0; i + 1 < chain.length; i++) {
-+      const a = chain[i];
-+      const b = chain[i + 1];
-+
-+      if (a === b) continue;
-+
-+      const key = a < b ? `${a}-${b}` : `${b}-${a}`;
-+      const existing = seen.get(key);
-+
-+      if (existing !== undefined) {
-+        // Two walls between the same pair of nodes: keep the thicker one so
-+        // the floor is inset correctly.
-+        if (segment.width > edges[existing].width) {
-+          edges[existing] = {
-+            a,
-+            b,
-+            wall: segment.wall,
-+            width: segment.width,
-+          };
-+        }
-+        continue;
-+      }
-+
-+      seen.set(key, edges.length);
-+      edges.push({ a, b, wall: segment.wall, width: segment.width });
-+    }
-+  }
-+
-+  return edges;
-+}
-+
-+/**
-+ * Drops every edge that cannot possibly be part of a closed loop.
-+ */
-+function pruneDanglingEdges<TWall extends RoomWallLike>(
-+  edges: GraphEdge<TWall>[],
-+  nodeCount: number,
-+): GraphEdge<TWall>[] {
-+  const alive = edges.map(() => true);
-+  let changed = true;
-+
-+  while (changed) {
-+    changed = false;
-+
-+    const degree = new Array<number>(nodeCount).fill(0);
-+
-+    for (let i = 0; i < edges.length; i++) {
-+      if (!alive[i]) continue;
-+      degree[edges[i].a] += 1;
-+      degree[edges[i].b] += 1;
-+    }
-+
-+    for (let i = 0; i < edges.length; i++) {
-+      if (!alive[i]) continue;
-+
-+      if (degree[edges[i].a] < 2 || degree[edges[i].b] < 2) {
-+        alive[i] = false;
-+        changed = true;
-+      }
-+    }
-+  }
-+
-+  return edges.filter((_, index) => alive[index]);
-+}
-+
-+// --------------------------------
-+// Face traversal
-+// --------------------------------
-+
-+interface FaceGraph<TWall extends RoomWallLike> {
-+  darts: Dart[];
-+  /** Position of each dart inside the sorted fan of its origin node. */
-+  dartOrder: number[];
-+  outgoing: Map<number, number[]>;
-+  edges: GraphEdge<TWall>[];
-+}
-+
-+function buildFaceGraph<TWall extends RoomWallLike>(
-+  edges: GraphEdge<TWall>[],
-+  positions: RoomPoint[],
-+): FaceGraph<TWall> {
-+  const darts: Dart[] = [];
-+
-+  for (let i = 0; i < edges.length; i++) {
-+    darts.push({ from: edges[i].a, to: edges[i].b, edge: i });
-+    darts.push({ from: edges[i].b, to: edges[i].a, edge: i });
-+  }
-+
-+  const outgoing = new Map<number, number[]>();
-+
-+  for (let i = 0; i < darts.length; i++) {
-+    const list = outgoing.get(darts[i].from);
-+
-+    if (list) {
-+      list.push(i);
-+    } else {
-+      outgoing.set(darts[i].from, [i]);
-+    }
-+  }
-+
-+  const angleOf = (dart: Dart): number => {
-+    const from = positions[dart.from];
-+    const to = positions[dart.to];
-+    return Math.atan2(to.z - from.z, to.x - from.x);
-+  };
-+
-+  const dartOrder = new Array<number>(darts.length).fill(0);
-+
-+  for (const list of outgoing.values()) {
-+    list.sort((a, b) => angleOf(darts[a]) - angleOf(darts[b]));
-+
-+    for (let i = 0; i < list.length; i++) {
-+      dartOrder[list[i]] = i;
-+    }
-+  }
-+
-+  return { darts, dartOrder, outgoing, edges };
-+}
-+
-+/**
-+ * Next dart of the face that lies to the left of `dart`.
-+ *
-+ * Taking the neighbour that comes first in clockwise order after the way we
-+ * arrived keeps the traversal hugging the inside of the smallest possible
-+ * loop, which is exactly what separates real rooms from the big loop drawn
-+ * around a group of them.
-+ */
-+function nextDart<TWall extends RoomWallLike>(
-+  graph: FaceGraph<TWall>,
-+  dart: number,
-+): number {
-+  const reversed = dart ^ 1;
-+  const fan = graph.outgoing.get(graph.darts[reversed].from);
-+
-+  if (!fan || fan.length === 0) {
-+    return reversed;
-+  }
-+
-+  const index = graph.dartOrder[reversed];
-+
-+  return fan[(index - 1 + fan.length) % fan.length];
-+}
-+
-+// --------------------------------
-+// Public API
-+// --------------------------------
-+
-+/**
-+ * Finds every closed region formed by the given walls.
-+ *
-+ * The result is ordered from the smallest to the largest room id so callers
-+ * get a deterministic list; callers are free to re-sort it.
-+ */
-+export function detectRooms<TWall extends RoomWallLike>(
-+  walls: Iterable<TWall>,
-+): DetectedRoom<TWall>[] {
-+  const segments = toSegments(walls);
-+
-+  // A closed region needs at least three boundaries.
-+  if (segments.length < 3) {
-+    return [];
-+  }
-+
-+  const candidates = collectCandidates(segments);
-+  const { roots, positions } = clusterCandidates(candidates);
-+
-+  const nodeIndexOfRoot = new Map<number, number>();
-+  const nodePositions: RoomPoint[] = [];
-+
-+  for (const [root, position] of positions) {
-+    nodeIndexOfRoot.set(root, nodePositions.length);
-+    nodePositions.push(position);
-+  }
-+
-+  const nodeOfCandidate = roots.map(
-+    (root) => nodeIndexOfRoot.get(root) as number,
-+  );
-+
-+  const edges = pruneDanglingEdges(
-+    buildEdges(segments, candidates, nodeOfCandidate),
-+    nodePositions.length,
-+  );
-+
-+  if (edges.length < 3) {
-+    return [];
-+  }
-+
-+  const graph = buildFaceGraph(edges, nodePositions);
-+  const visited = new Array<boolean>(graph.darts.length).fill(false);
-+  const rooms: DetectedRoom<TWall>[] = [];
-+
-+  for (let start = 0; start < graph.darts.length; start++) {
-+    if (visited[start]) continue;
-+
-+    const faceDarts: number[] = [];
-+    let current = start;
-+
-+    do {
-+      visited[current] = true;
-+      faceDarts.push(current);
-+      current = nextDart(graph, current);
-+    } while (current !== start && !visited[current]);
-+
-+    if (faceDarts.length < 3) {
-+      continue;
-+    }
-+
-+    const centerline = faceDarts.map(
-+      (dart) => nodePositions[graph.darts[dart].from],
-+    );
-+
-+    // The outer boundary of every group of walls comes out wound the other
-+    // way round, which is how it is told apart from the actual rooms.
-+    if (signedArea(centerline) <= MIN_ROOM_AREA) {
-+      continue;
-+    }
-+
-+    const widths = faceDarts.map((dart) => edges[graph.darts[dart].edge].width);
-+    const polygon = insetPolygon(centerline, widths) ?? centerline;
-+
-+    const roomWalls: TWall[] = [];
-+
-+    for (const dart of faceDarts) {
-+      const wall = edges[graph.darts[dart].edge].wall;
-+
-+      if (!roomWalls.includes(wall)) {
-+        roomWalls.push(wall);
-+      }
-+    }
-+
-+    rooms.push({
-+      id: roomSignature(centerline),
-+      polygon,
-+      centerline,
-+      area: Math.abs(signedArea(polygon)),
-+      perimeter: polygonPerimeter(polygon),
-+      center: polygonCenter(polygon),
-+      bounds: polygonBounds(polygon),
-+      walls: roomWalls,
-+    });
-+  }
-+
-+  rooms.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-+
-+  return rooms;
-+}

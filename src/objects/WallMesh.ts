@@ -8,6 +8,7 @@ import {
   type OpeningValidation,
 } from '../utils/openingLayout';
 import type { OpeningParams } from '../types/Opening';
+import { getPlasterTexture } from '../materials/proceduralTextures';
 
 export interface WallOptions {
   startPoint: THREE.Vector3;
@@ -60,13 +61,16 @@ export class WallMesh extends BaseMesh {
       });
     } else {
       defaultMat = new THREE.MeshStandardMaterial({
-        color: 0xd1d5db,
-        roughness: 0.5,
-        metalness: 0.1,
+        map: getPlasterTexture(),
+        roughness: 0.85,
+        metalness: 0.02,
       });
     }
 
     super(new THREE.BoxGeometry(1, 1, 1), defaultMat);
+
+    this.castShadow = !isPreview;
+    this.receiveShadow = !isPreview;
 
     this.isPreview = isPreview;
     this.isRoomBoundary = options.isRoomBoundary ?? true;
@@ -77,15 +81,17 @@ export class WallMesh extends BaseMesh {
 
     if (!isPreview) {
       this.hoverMaterial = new THREE.MeshStandardMaterial({
-        color: 0x60a5fa,
+        color: 0x93c5fd,
         roughness: 0.4,
+        transparent: true,
+        opacity: 0.85,
       });
       this.selectMaterial = new THREE.MeshStandardMaterial({
         color: 0xf59e0b,
         roughness: 0.4,
       });
 
-      // Edge outline for crisp appearance
+      // Edge outline for crisp architectural appearance
       const edgeGeo = new THREE.EdgesGeometry(this.geometry);
       const edgeMat = new THREE.LineBasicMaterial({
         color: 0x374151,
@@ -96,6 +102,21 @@ export class WallMesh extends BaseMesh {
     }
 
     this.updateGeometry();
+  }
+
+  protected override updateMaterialState(): void {
+    super.updateMaterialState();
+
+    if (this.edgesMesh) {
+      const edgeMat = this.edgesMesh.material as THREE.LineBasicMaterial;
+      if (this.isSelected) {
+        edgeMat.color.setHex(0xf59e0b); // Vibrant orange edge for selected wall
+      } else if (this.isHovered) {
+        edgeMat.color.setHex(0x60a5fa); // Sky blue edge for hovered wall
+      } else {
+        edgeMat.color.setHex(0x374151); // Dark neutral edge
+      }
+    }
   }
 
   getOrientation(): WallOrientation {

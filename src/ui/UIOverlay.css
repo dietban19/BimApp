@@ -2,26 +2,52 @@
   position: absolute;
   top: 16px;
   left: 16px;
+  bottom: 16px;
   z-index: 100;
   pointer-events: none;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
   user-select: none;
+  display: flex;
+  flex-direction: column;
 }
 
 .ui-card {
   pointer-events: auto;
-  background: rgba(18, 24, 38, 0.88);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+  background: rgba(18, 24, 38, 0.92);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 12px 40px 0 rgba(0, 0, 0, 0.45);
   border-radius: 12px;
-  padding: 16px;
-  width: 260px;
+  padding: 14px;
+  width: 290px;
+  max-height: 100%;
+  overflow-y: auto;
   color: #f3f4f6;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
+}
+
+/* Custom Scrollbars */
+.ui-card::-webkit-scrollbar,
+.ui-material-grid::-webkit-scrollbar,
+.ui-list::-webkit-scrollbar {
+  width: 5px;
+}
+
+.ui-card::-webkit-scrollbar-track,
+.ui-material-grid::-webkit-scrollbar-track,
+.ui-list::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 4px;
+}
+
+.ui-card::-webkit-scrollbar-thumb,
+.ui-material-grid::-webkit-scrollbar-thumb,
+.ui-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
 }
 
 .ui-header {
@@ -40,7 +66,7 @@
 .ui-mode-toggle {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  background: rgba(0, 0, 0, 0.3);
+  background: rgba(0, 0, 0, 0.35);
   border-radius: 8px;
   padding: 3px;
   gap: 4px;
@@ -78,11 +104,11 @@
   background: rgba(239, 68, 68, 0.15);
   color: #f87171;
   border: 1px solid rgba(239, 68, 68, 0.3);
-  margin-top: 8px;
+  margin-top: 6px;
 }
 
 .ui-btn-danger:hover {
-  background: rgba(239, 68, 68, 0.8);
+  background: rgba(239, 68, 68, 0.85);
   color: #ffffff;
 }
 
@@ -114,7 +140,7 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
-  max-height: 140px;
+  max-height: 130px;
   overflow-y: auto;
 }
 
@@ -150,13 +176,13 @@
 .ui-inspector {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   border-top: 1px solid rgba(255, 255, 255, 0.1);
-  padding-top: 10px;
+  padding-top: 8px;
 }
 
 .ui-section-title {
-  margin: 0;
+  margin: 0 0 4px 0;
   font-size: 13px;
   font-weight: 600;
   color: #f3f4f6;
@@ -165,38 +191,271 @@
 .ui-field {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 3px;
+  margin-bottom: 6px;
+}
 
-  label {
-    font-size: 12px;
-    color: #9ca3af;
-  }
+.ui-field label {
+  font-size: 11.5px;
+  color: #9ca3af;
+}
 
-  input {
-    background: rgba(0, 0, 0, 0.4);
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    border-radius: 6px;
-    padding: 6px 10px;
-    color: #ffffff;
-    font-size: 13px;
-    outline: none;
-    transition: border-color 0.2s;
-  }
+.ui-field input {
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  padding: 5px 8px;
+  color: #ffffff;
+  font-size: 12.5px;
+  outline: none;
+  transition: border-color 0.2s;
+}
 
-  input:focus {
-    border-color: #2563eb;
-  }
+.ui-field input:focus {
+  border-color: #2563eb;
 }
 
 .ui-field-readonly {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  font-size: 12px;
+  font-size: 11.5px;
   color: #9ca3af;
+  margin-bottom: 4px;
+}
 
-  strong {
-    color: #e5e7eb;
-    font-weight: 500;
-  }
+.ui-field-readonly strong {
+  color: #e5e7eb;
+  font-weight: 500;
+}
+
+/* ----------------------------------------------------
+ * Collapsible Section Styles
+ * ---------------------------------------------------- */
+.ui-collapsible-section {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.2);
+  overflow: hidden;
+  transition: all 0.2s ease;
+}
+
+.ui-collapsible-section.open {
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.ui-collapsible-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: transparent;
+  border: none;
+  padding: 8px 10px;
+  color: #e2e8f0;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s ease;
+}
+
+.ui-collapsible-header:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: #ffffff;
+}
+
+.ui-collapsible-title-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ui-chevron {
+  font-size: 9px;
+  color: #94a3b8;
+  display: inline-block;
+  transition: transform 0.2s ease;
+}
+
+.ui-chevron.open {
+  transform: rotate(90deg);
+  color: #60a5fa;
+}
+
+.ui-collapsible-badge {
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.12);
+  padding: 2px 6px;
+  border-radius: 10px;
+  color: #94a3b8;
+}
+
+.ui-collapsible-body {
+  padding: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* ----------------------------------------------------
+ * Material Picker & Unity-Style Sphere Thumbnails
+ * ---------------------------------------------------- */
+.ui-material-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ui-material-picker-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.ui-picker-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #cbd5e1;
+}
+
+.ui-btn-upload {
+  background: rgba(59, 130, 246, 0.18);
+  border: 1px solid rgba(59, 130, 246, 0.4);
+  color: #93c5fd;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 4px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.ui-btn-upload:hover {
+  background: rgba(59, 130, 246, 0.35);
+  color: #ffffff;
+}
+
+.ui-category-pills {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.ui-category-pill {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #94a3b8;
+  font-size: 10.5px;
+  padding: 3px 7px;
+  border-radius: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+
+.ui-category-pill:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+}
+
+.ui-category-pill.active {
+  background: #3b82f6;
+  border-color: #3b82f6;
+  color: #ffffff;
+}
+
+.ui-material-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 2px;
+}
+
+.ui-material-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 6px 4px;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  color: #cbd5e1;
+}
+
+.ui-material-card:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(96, 165, 250, 0.5);
+  transform: translateY(-1px);
+}
+
+.ui-material-card.active {
+  border-color: #3b82f6;
+  background: rgba(59, 130, 246, 0.2);
+  box-shadow: 0 0 10px rgba(59, 130, 246, 0.35);
+}
+
+.ui-material-sphere-wrapper {
+  position: relative;
+  width: 52px;
+  height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ui-material-sphere-img {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  object-fit: cover;
+  filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.4));
+  transition: transform 0.18s ease;
+}
+
+.ui-material-card:hover .ui-material-sphere-img {
+  transform: scale(1.06);
+}
+
+.ui-material-sphere-placeholder {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: #475569;
+}
+
+.ui-material-check {
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  background: #3b82f6;
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: bold;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1.5px solid #1e293b;
+}
+
+.ui-material-name {
+  font-size: 11px;
+  font-weight: 500;
+  text-align: center;
+  line-height: 1.2;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

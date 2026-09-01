@@ -1076,6 +1076,7 @@ export class WallToolComponent extends Component {
         this.defaultWidth,
         this.walls,
       );
+      console.log('JUNCTION', junction);
 
       const length = junction.start.distanceTo(junction.end);
 

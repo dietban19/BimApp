@@ -49,6 +49,7 @@ export class WallMesh extends BaseMesh {
     const isPreview = options.isPreview ?? false;
     const height = options.height ?? 3.0;
     const width = options.width ?? 0.3;
+    console.log('width', width);
 
     let defaultMat: THREE.Material;
     if (isPreview) {

@@ -194,7 +194,7 @@ export class RoomComponent extends Component {
 
       const name = `Room ${index + 1}`;
       const roomHeight = Math.max(3, ...room.walls.map((wall) => wall.height));
-
+      console.log('room', room.polygon, room.bounds, room.perimeter);
       const options = {
         polygon: room.polygon,
         name,

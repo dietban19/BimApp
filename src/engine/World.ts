@@ -8,6 +8,23 @@ export interface WorldOptions {
   far?: number;
 }
 
+export type TestMeshColor =
+  | 'red'
+  | 'blue'
+  | 'green'
+  | 'purple'
+  | 'yellow'
+  | 'orange';
+
+const TEST_MESH_COLORS: Readonly<Record<TestMeshColor, number>> = {
+  red: 0xef4444,
+  blue: 0x3b82f6,
+  green: 0x22c55e,
+  purple: 0xa855f7,
+  yellow: 0xeab308,
+  orange: 0xf97316,
+};
+
 export class World {
   readonly id = crypto.randomUUID();
 
@@ -29,6 +46,11 @@ export class World {
   enabled = true;
 
   private readonly components = new Map<object, Component>();
+
+  private readonly ownedMeshResources = new Map<
+    THREE.Mesh,
+    { geometry: THREE.BufferGeometry; materials: THREE.Material[] }
+  >();
 
   private readonly resizeObserver: ResizeObserver;
 
@@ -198,6 +220,42 @@ export class World {
   }
 
   /**
+   * Adds a small test sphere at grid/world position x,z.
+   *
+   * The returned mesh is owned by this world and is automatically cleaned up
+   * when removed or when the world is disposed.
+   */
+  addTestMesh(
+    x: number,
+    z: number,
+    color: TestMeshColor = 'orange',
+  ): THREE.Mesh {
+    if (this.disposed) {
+      throw new Error('Cannot add a test mesh to a disposed world.');
+    }
+
+    const geometry = new THREE.SphereGeometry(0.15, 16, 12);
+    const material = new THREE.MeshStandardMaterial({
+      color: TEST_MESH_COLORS[color],
+    });
+
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.position.set(x, 0.15, z);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+
+    this.scene.add(mesh);
+    this.meshes.add(mesh);
+
+    this.ownedMeshResources.set(mesh, {
+      geometry,
+      materials: [material],
+    });
+
+    return mesh;
+  }
+
+  /**
    * Removes a model mesh from the world and scene.
    *
    * This does not automatically dispose its geometry/material because
@@ -206,6 +264,18 @@ export class World {
   removeMesh(mesh: THREE.Mesh): void {
     this.meshes.delete(mesh);
     this.scene.remove(mesh);
+
+    const ownedResources = this.ownedMeshResources.get(mesh);
+
+    if (ownedResources) {
+      ownedResources.geometry.dispose();
+
+      for (const material of ownedResources.materials) {
+        material.dispose();
+      }
+
+      this.ownedMeshResources.delete(mesh);
+    }
   }
 
   dispose(): void {
@@ -226,6 +296,11 @@ export class World {
     }
 
     this.components.clear();
+
+    for (const mesh of [...this.ownedMeshResources.keys()]) {
+      this.removeMesh(mesh);
+    }
+
     this.meshes.clear();
 
     this.scene.clear();

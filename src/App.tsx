@@ -70,6 +70,19 @@ function App() {
     const roomComp = world.add(RoomComponent);
     setRoomTool(roomComp);
 
+    // world.addTestMesh(5.237499999999999, 5.4625, 'red');
+    // world.addTestMesh(0.6124999999999998, 0.5374999999999996, 'green');
+    // world.addTestMesh(5.387499999999999, 5.4625, 'orange');
+    // world.addTestMesh(0.7625, 0.5374999999999996, 'blue');
+    world.addTestMesh(0.35, 0.19999999999999998, 'red');
+    world.addTestMesh(3.5, 3.8, 'red');
+    // world.addTestMesh(3.2, 0.5, 'red');
+    // world.addTestMesh(3.2, 3.5, 'blue');
+    //
+    // world.addTestMesh(5.237499999999999, 0.5375, 'red');
+
+    // world.addTestMesh(5.237499999999999, 5.4625, 'red');
+
     // --------------------------------
     // Start application
     // --------------------------------

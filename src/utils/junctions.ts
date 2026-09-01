@@ -32,7 +32,6 @@ export function calculateWallJunctions(
   const walls = [...existingWalls].filter((w) => !w.isPreview);
 
   if (orientation === 'x') {
-    console.log('X');
     return snapXWall(rawStart, rawEnd, _newWallWidth, walls);
   } else {
     return snapZWall(rawStart, rawEnd, _newWallWidth, walls);
@@ -80,14 +79,11 @@ function snapXWall(
     const minZ = Math.min(w.startPoint.z, w.endPoint.z);
     const maxZ = Math.max(w.startPoint.z, w.endPoint.z);
 
-    console.log(minZ, maxZ);
-
     return (
       wallZ >= minZ - SNAP_EPSILON - w.width &&
       wallZ <= maxZ + SNAP_EPSILON + w.width
     );
   });
-  console.log('perp', perp, perpX);
 
   // Pass 0 – snap wallZ to the front or back edge of any Z wall whose
   // endpoint the X wall is connecting to.  This determines whether the
@@ -121,11 +117,8 @@ function snapXWall(
       startX <= rightFace + SNAP_EPSILON
     ) {
       if (dirX > 0) {
-        console.log('_11_');
         startX = isTJunction ? rightFace : leftFace;
       } else if (dirX < 0) {
-        console.log('_22_');
-
         startX = isTJunction ? leftFace : rightFace;
       }
     }
@@ -141,11 +134,8 @@ function snapXWall(
     const leftFace = centerX - halfW;
     const rightFace = centerX + halfW;
 
-    console.log('T JUNCTOIN', isTJunction);
     if (endX >= leftFace - SNAP_EPSILON && endX <= rightFace + SNAP_EPSILON) {
       if (dirX > 0) {
-        console.log('_33_');
-
         endX = isTJunction ? leftFace : rightFace;
       } else {
         endX = isTJunction ? rightFace : leftFace;
@@ -305,7 +295,6 @@ function snapZWall(
     const maxX = Math.max(w.startPoint.x, w.endPoint.x);
     return wallX >= minX - SNAP_EPSILON && wallX <= maxX + SNAP_EPSILON;
   });
-  console.log('z perps', perp);
 
   // Pass 0 – snap wallX to the left or right edge of any X wall whose
   // endpoint this Z wall is connecting to.
@@ -315,12 +304,10 @@ function snapZWall(
 
     //
     if (Math.abs(wallX - minX) <= SNAP_EPSILON) {
-      console.log('MIN');
       wallX = minX + halfW;
       break;
     }
     if (Math.abs(wallX - maxX) <= SNAP_EPSILON) {
-      console.log('MAX');
       wallX = maxX - halfW;
       break;
     }
@@ -335,10 +322,8 @@ function snapZWall(
       startZ <= topFace + SNAP_EPSILON
     ) {
       if (dirZ > 0) {
-        console.log('AAAA');
         startZ = topFace;
       } else if (dirZ < 0) {
-        console.log('BBB');
         startZ = bottomFace;
       }
     }
@@ -350,11 +335,8 @@ function snapZWall(
     const topFace = centerZ + halfW;
     if (endZ >= bottomFace - SNAP_EPSILON && endZ <= topFace + SNAP_EPSILON) {
       if (dirZ > 0) {
-        console.log('111');
         endZ = bottomFace;
       } else if (dirZ < 0) {
-        console.log('222');
-
         endZ = topFace;
       }
     }

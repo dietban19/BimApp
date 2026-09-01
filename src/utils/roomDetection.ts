@@ -63,6 +63,7 @@ interface Candidate {
   t: number;
   x: number;
   z: number;
+  kind: 'endpoint' | 'intersection';
   /** How far away another candidate may sit and still be the same node. */
   radius: number;
 }
@@ -119,6 +120,7 @@ function polygonBounds(points: readonly RoomPoint[]): RoomBounds {
   let maxX = -Infinity;
   let minZ = Infinity;
   let maxZ = -Infinity;
+  console.log('POints: ', points);
 
   for (const point of points) {
     minX = Math.min(minX, point.x);
@@ -127,7 +129,12 @@ function polygonBounds(points: readonly RoomPoint[]): RoomBounds {
     maxZ = Math.max(maxZ, point.z);
   }
 
-  return { minX, maxX, minZ, maxZ };
+  return {
+    minX: minX - 0.3,
+    maxX: maxX + 0.3,
+    minZ: minZ - 0.3,
+    maxZ: maxZ + 0.3,
+  };
 }
 
 function polygonCenter(points: readonly RoomPoint[]): RoomPoint {
@@ -226,8 +233,7 @@ function insetPolygon(
     const ia = result[i];
     const ib = result[(i + 1) % count];
 
-    const dot =
-      (b.x - a.x) * (ib.x - ia.x) + (b.z - a.z) * (ib.z - ia.z);
+    const dot = (b.x - a.x) * (ib.x - ia.x) + (b.z - a.z) * (ib.z - ia.z);
 
     if (dot <= 0) {
       return null;
@@ -273,13 +279,14 @@ function toSegments<TWall extends RoomWallLike>(
     if (orientation === 'x') {
       const min = Math.min(start.x, end.x);
       const max = Math.max(start.x, end.x);
+      const axisPos = (start.z + end.z) / 2;
 
       if (max - min < MIN_SEGMENT_LENGTH) continue;
 
       segments.push({
         wall,
         orientation,
-        axisPos: start.z,
+        axisPos,
         min,
         max,
         width,
@@ -287,13 +294,14 @@ function toSegments<TWall extends RoomWallLike>(
     } else {
       const min = Math.min(start.z, end.z);
       const max = Math.max(start.z, end.z);
+      const axisPos = (start.x + end.x) / 2;
 
       if (max - min < MIN_SEGMENT_LENGTH) continue;
 
       segments.push({
         wall,
         orientation,
-        axisPos: start.x,
+        axisPos,
         min,
         max,
         width,
@@ -318,20 +326,26 @@ function collectCandidates<TWall extends RoomWallLike>(
 ): Candidate[] {
   const candidates: Candidate[] = [];
 
-  const push = (segment: number, t: number, point: RoomPoint): void => {
+  const push = (
+    segment: number,
+    t: number,
+    point: RoomPoint,
+    kind: Candidate['kind'],
+  ): void => {
     candidates.push({
       segment,
       t,
       x: point.x,
       z: point.z,
+      kind,
       radius: segments[segment].width / 2 + JOIN_EPS,
     });
   };
 
   for (let i = 0; i < segments.length; i++) {
     const segment = segments[i];
-    push(i, segment.min, pointOnSegment(segment, segment.min));
-    push(i, segment.max, pointOnSegment(segment, segment.max));
+    push(i, segment.min, pointOnSegment(segment, segment.min), 'endpoint');
+    push(i, segment.max, pointOnSegment(segment, segment.max), 'endpoint');
   }
 
   for (let i = 0; i < segments.length; i++) {
@@ -368,8 +382,8 @@ function collectCandidates<TWall extends RoomWallLike>(
 
       const point: RoomPoint = { x: crossX, z: crossZ };
 
-      push(xIndex, crossX, point);
-      push(zIndex, crossZ, point);
+      push(xIndex, crossX, point, 'intersection');
+      push(zIndex, crossZ, point, 'intersection');
     }
   }
 
@@ -422,22 +436,37 @@ function clusterCandidates(candidates: Candidate[]): {
     }
   }
 
-  const sums = new Map<number, { x: number; z: number; count: number }>();
   const roots = candidates.map((_, index) => find(index));
+  const membersByRoot = new Map<number, number[]>();
 
   for (let i = 0; i < candidates.length; i++) {
     const root = roots[i];
-    const entry = sums.get(root) ?? { x: 0, z: 0, count: 0 };
-    entry.x += candidates[i].x;
-    entry.z += candidates[i].z;
-    entry.count += 1;
-    sums.set(root, entry);
+    const members = membersByRoot.get(root);
+
+    if (members) {
+      members.push(i);
+    } else {
+      membersByRoot.set(root, [i]);
+    }
   }
 
   const positions = new Map<number, RoomPoint>();
 
-  for (const [root, entry] of sums) {
-    positions.set(root, { x: entry.x / entry.count, z: entry.z / entry.count });
+  for (const [root, members] of membersByRoot) {
+    const preferred = members.filter(
+      (index) => candidates[index].kind === 'intersection',
+    );
+    const source = preferred.length > 0 ? preferred : members;
+
+    let x = 0;
+    let z = 0;
+
+    for (const index of source) {
+      x += candidates[index].x;
+      z += candidates[index].z;
+    }
+
+    positions.set(root, { x: x / source.length, z: z / source.length });
   }
 
   return { roots, positions };
@@ -634,6 +663,7 @@ function nextDart<TWall extends RoomWallLike>(
 export function detectRooms<TWall extends RoomWallLike>(
   walls: Iterable<TWall>,
 ): DetectedRoom<TWall>[] {
+  console.log('detected room', walls);
   const segments = toSegments(walls);
 
   // A closed region needs at least three boundaries.
@@ -707,7 +737,7 @@ export function detectRooms<TWall extends RoomWallLike>(
         roomWalls.push(wall);
       }
     }
-
+    
     rooms.push({
       id: roomSignature(centerline),
       polygon,

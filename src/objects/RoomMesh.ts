@@ -62,7 +62,7 @@ export class RoomSurfaceMesh extends BaseMesh {
 
     this.roomId = roomId;
     this.surfaceType = surfaceType;
-    this.castShadow = false;
+    this.castShadow = true;
     this.receiveShadow = true;
     this.renderOrder = 1;
     this.rotation.x = -Math.PI / 2;
@@ -142,11 +142,17 @@ export class RoomMesh extends THREE.Group {
    */
   update(options: RoomMeshOptions): void {
     this.floorSurface.geometry.dispose();
-    this.floorSurface.geometry = RoomMesh.createGeometry(options.polygon);
+    this.floorSurface.geometry = RoomMesh.createGeometry(
+      options.polygon,
+      FLOOR_THICKNESS,
+    );
     this.floorSurface.position.y = FLOOR_HEIGHT + FLOOR_THICKNESS * 0.5;
 
     this.roofSurface.geometry.dispose();
-    this.roofSurface.geometry = RoomMesh.createGeometry(options.polygon);
+    this.roofSurface.geometry = RoomMesh.createGeometry(
+      options.polygon,
+      ROOF_THICKNESS,
+    );
     this.roofSurface.position.y =
       options.height + ROOF_HEIGHT_OFFSET + ROOF_THICKNESS * 0.5;
 
@@ -178,22 +184,67 @@ export class RoomMesh extends THREE.Group {
   // Geometry
   // --------------------------------
 
-  static createGeometry(polygon: readonly RoomPoint[]): THREE.BufferGeometry {
+  static createGeometry(
+    polygon: readonly RoomPoint[],
+    thickness = FLOOR_THICKNESS,
+  ): THREE.BufferGeometry {
     if (polygon.length < 3) {
       return new THREE.BufferGeometry();
     }
 
     const shape = new THREE.Shape();
 
-    shape.moveTo(polygon[0].x, -polygon[0].z);
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minZ = Infinity;
+    let maxZ = -Infinity;
+    for (let i = 1; i < polygon.length; i++) {
+      minX = Math.min(minX, polygon[i].x);
+      maxX = Math.max(maxX, polygon[i].x);
+      minZ = Math.min(minZ, polygon[i].z);
+      maxZ = Math.max(maxZ, polygon[i].z);
+    }
+    let firstXPoint = polygon[0].x;
+    let firstZPoint = polygon[0].z;
+    if (Math.abs(polygon[0].x - minX) < 0.01) {
+      firstXPoint = minX - 0.3;
+    } else if (Math.abs(polygon[0].x - maxX) < 0.01) {
+      firstXPoint = maxX + 0.3;
+    }
+    if (Math.abs(polygon[0].z - minZ) < 0.01) {
+      firstZPoint = minZ - 0.3;
+    } else if (Math.abs(polygon[0].z - maxZ) < 0.01) {
+      firstZPoint = maxZ + 0.3;
+    }
+    shape.moveTo(firstXPoint, -firstZPoint);
 
     for (let i = 1; i < polygon.length; i++) {
-      shape.lineTo(polygon[i].x, -polygon[i].z);
+      let xPoint = 0;
+      let zPoint = 0;
+      console.log('POINT', polygon[i].x);
+      if (Math.abs(polygon[i].x - minX) < 0.01) {
+        xPoint = minX - 0.3;
+      } else if (Math.abs(polygon[i].x - maxX) < 0.01) {
+        xPoint = maxX + 0.3;
+      }
+      if (Math.abs(polygon[i].z - minZ) < 0.01) {
+        zPoint = minZ - 0.3;
+      } else if (Math.abs(polygon[i].z - maxZ) < 0.01) {
+        zPoint = maxZ + 0.3;
+      }
+      shape.lineTo(xPoint, -zPoint);
     }
 
     shape.closePath();
 
-    return new THREE.ShapeGeometry(shape);
+    const geometry = new THREE.ExtrudeGeometry(shape, {
+      depth: thickness,
+      bevelEnabled: false,
+      steps: 1,
+    });
+
+    geometry.translate(0, 0, -thickness / 2);
+    return geometry;
   }
 
   static createOutlineGeometry(

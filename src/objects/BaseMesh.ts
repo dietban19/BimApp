@@ -2,7 +2,7 @@ import * as THREE from 'three';
 
 export abstract class BaseMesh extends THREE.Mesh {
   readonly meshId: string = crypto.randomUUID();
-  
+
   isSelected = false;
   isHovered = false;
 
@@ -19,7 +19,9 @@ export abstract class BaseMesh extends THREE.Mesh {
     material?: THREE.Material | THREE.Material[],
   ) {
     const baseMat = Array.isArray(material) ? material[0] : material;
-    const defaultMat = baseMat ?? new THREE.MeshStandardMaterial({ color: 0xd1d5db, roughness: 0.7 });
+    const defaultMat =
+      baseMat ??
+      new THREE.MeshStandardMaterial({ color: 0xd1d5db, roughness: 0.7 });
 
     super(geometry, defaultMat);
 
@@ -51,7 +53,10 @@ export abstract class BaseMesh extends THREE.Mesh {
     this.updateMaterialState();
   }
 
-  setCustomMaterial(material: THREE.Material | null, materialId?: string): void {
+  setCustomMaterial(
+    material: THREE.Material | null,
+    materialId?: string,
+  ): void {
     this.customMaterial = material;
     this.customMaterialId = materialId ?? (material ? 'custom' : null);
     this.updateMaterialState();
@@ -96,8 +101,14 @@ export abstract class BaseMesh extends THREE.Mesh {
     this.disposeMaterial(this.defaultMaterial);
     this.disposeMaterial(this.hoverMaterial);
     this.disposeMaterial(this.selectMaterial);
+    this.disposeMaterial(this.customMaterial);
+    this.disposeMaterial(this.previewMaterial);
+
     this.previewMaterial = null;
     this.customMaterial = null;
+    this.customMaterialId = null;
+    this.isSelected = false;
+    this.isHovered = false;
   }
 
   protected disposeMaterial(material?: THREE.Material | null): void {

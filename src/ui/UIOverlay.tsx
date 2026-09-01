@@ -19,15 +19,56 @@ interface UIOverlayProps {
 }
 
 const MODE_BUTTONS: ReadonlyArray<{ mode: ToolMode; label: string }> = [
-  { mode: 'select', label: '🔍 Select' },
-  { mode: 'add-wall', label: '🧱 Wall' },
-  { mode: 'add-door', label: '🚪 Door' },
-  { mode: 'add-window', label: '🪟 Window' },
+  { mode: 'select', label: 'Select' },
+  { mode: 'add-wall', label: 'Wall' },
+  { mode: 'add-door', label: 'Door' },
+  { mode: 'add-window', label: 'Window' },
 ];
 
 const OPENING_ICONS: Readonly<Record<string, string>> = {
   door: '🚪',
   window: '🪟',
+};
+
+interface RoomSurfaceInspectorProps {
+  wallTool: WallToolComponent;
+  surface: import('../objects/RoomMesh').RoomSurfaceMesh;
+}
+
+const RoomSurfaceInspector: React.FC<RoomSurfaceInspectorProps> = ({
+  wallTool,
+  surface,
+}) => {
+  const [materialsOpen, setMaterialsOpen] = useState(true);
+
+  return (
+    <div className="ui-inspector">
+      <h3 className="ui-section-title">
+        Selected {surface.surfaceType === 'floor' ? 'Floor' : 'Roof'}
+      </h3>
+
+      <CollapsibleSection
+        title={`${surface.surfaceType === 'floor' ? 'Floor' : 'Roof'} Material`}
+        isOpen={materialsOpen}
+        onToggle={() => setMaterialsOpen(!materialsOpen)}
+        icon="🎨"
+      >
+        <MaterialPicker
+          title={
+            surface.surfaceType === 'floor' ? 'Floor Finish' : 'Roof Finish'
+          }
+          currentMaterialId={surface.getCustomMaterialId() ?? 'concrete'}
+          allowedCategories={['concrete', 'tiles', 'wood', 'metal']}
+          onSelectMaterial={(material, materialId) => {
+            wallTool.setSelectedRoomSurfaceMaterial(material, materialId);
+          }}
+          onPreviewMaterial={(material) => {
+            wallTool.previewRoomSurfaceMaterial(material);
+          }}
+        />
+      </CollapsibleSection>
+    </div>
+  );
 };
 
 function parsePositive(value: string): number | null {
@@ -66,8 +107,16 @@ const RoomPanel: React.FC<RoomPanelProps> = ({ roomTool }) => {
           </button>
           <button
             type="button"
+            className={`ui-btn ${roomTool.showRoofs ? 'active' : ''}`}
+            onClick={() => roomTool.toggleRoofs()}
+          >
+            ⛰️ Roofs
+          </button>
+          <button
+            type="button"
             className={`ui-btn ${roomTool.showLabels ? 'active' : ''}`}
             onClick={() => roomTool.toggleLabels()}
+            style={{ gridColumn: '1 / -1' }}
           >
             🏷️ Labels
           </button>
@@ -75,7 +124,8 @@ const RoomPanel: React.FC<RoomPanelProps> = ({ roomTool }) => {
 
         {rooms.length === 0 ? (
           <div className="ui-instruction" style={{ marginTop: '8px' }}>
-            No rooms yet. Close a region with walls and it is detected automatically.
+            No rooms yet. Close a region with walls and it is detected
+            automatically.
           </div>
         ) : (
           <ul className="ui-list" style={{ marginTop: '8px' }}>
@@ -131,8 +181,8 @@ const WallInspector: React.FC<WallInspectorProps> = ({
 
         {wallTool.resizeMode && (
           <div className="ui-instruction">
-            Click an end node to open the gumball, click the gumball arrow to start
-            resize, move the mouse, then click once to finish.
+            Click an end node to open the gumball, click the gumball arrow to
+            start resize, move the mouse, then click once to finish.
           </div>
         )}
 
@@ -487,12 +537,16 @@ export const UIOverlay: React.FC<UIOverlayProps> = ({ wallTool, roomTool }) => {
 
   const selectedWall = wallTool.selectedWall;
   const selectedOpening = wallTool.selectedOpening;
+  const selectedRoomSurface = wallTool.selectedRoomSurface;
 
   return (
     <div className="ui-overlay-container">
       <div className="ui-card">
         <div className="ui-header">
-          <h2 className="ui-title">Modeling Tools</h2>
+          <div>
+            <p className="ui-kicker">Studio</p>
+            <h2 className="ui-title">Room Editor</h2>
+          </div>
         </div>
 
         {/* Mode Selector Toggle */}
@@ -538,17 +592,27 @@ export const UIOverlay: React.FC<UIOverlayProps> = ({ wallTool, roomTool }) => {
               {wallTool.openingPreviewMessage}
             </span>
           )}
-          {isSelect && !selectedWall && !selectedOpening && (
-            <span>
-              Hover and click a wall, door or window to select and edit it.
-            </span>
-          )}
+          {isSelect &&
+            !selectedWall &&
+            !selectedOpening &&
+            !selectedRoomSurface && (
+              <span>
+                Hover and click a wall, door, window, floor or roof to select
+                and edit it.
+              </span>
+            )}
           {isSelect && selectedWall && (
             <span className="ui-highlight-text">Wall selected.</span>
           )}
           {isSelect && selectedOpening && (
             <span className="ui-highlight-text">
               {OPENING_LABELS[selectedOpening.type]} selected.
+            </span>
+          )}
+          {isSelect && selectedRoomSurface && (
+            <span className="ui-highlight-text">
+              {selectedRoomSurface.surfaceType === 'floor' ? 'Floor' : 'Roof'}{' '}
+              selected.
             </span>
           )}
         </div>
@@ -567,6 +631,13 @@ export const UIOverlay: React.FC<UIOverlayProps> = ({ wallTool, roomTool }) => {
 
         {isSelect && selectedOpening && (
           <OpeningInspector wallTool={wallTool} opening={selectedOpening} />
+        )}
+
+        {isSelect && selectedRoomSurface && (
+          <RoomSurfaceInspector
+            wallTool={wallTool}
+            surface={selectedRoomSurface}
+          />
         )}
       </div>
     </div>

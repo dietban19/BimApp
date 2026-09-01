@@ -6,6 +6,7 @@ import { WallMesh } from '../objects/WallMesh';
 import { Opening } from '../objects/openings/Opening';
 import { WindowMesh } from '../objects/openings/WindowMesh';
 import { DoorMesh } from '../objects/openings/DoorMesh';
+import { RoomSurfaceMesh } from '../objects/RoomMesh';
 import {
   createDefaultOpeningParams,
   createOpening,
@@ -20,7 +21,7 @@ export type ToolMode = 'select' | 'add-wall' | 'add-door' | 'add-window';
 export type PlacementState = 'idle' | 'picking-end';
 
 /** Anything the user can select in the scene. */
-export type Selectable = WallMesh | Opening;
+export type Selectable = WallMesh | Opening | RoomSurfaceMesh;
 
 /**
  * Placement modes that cut an opening into an existing wall, mapped to the
@@ -75,9 +76,11 @@ export class WallToolComponent extends Component {
 
   selectedWall: WallMesh | null = null;
   selectedOpening: Opening | null = null;
+  selectedRoomSurface: RoomSurfaceMesh | null = null;
 
   hoveredWall: WallMesh | null = null;
   hoveredOpening: Opening | null = null;
+  hoveredRoomSurface: RoomSurfaceMesh | null = null;
 
   /** True while the opening ghost under the cursor could actually be placed. */
   openingPreviewValid = false;
@@ -114,9 +117,10 @@ export class WallToolComponent extends Component {
   private activeResizeHandle: ResizeHandle | null = null;
   private activeResizeDrag: ResizeDragState | null = null;
   private resizeHandles: ResizeHandle[] = [];
-  private gumballHandle:
-    | THREE.Mesh<THREE.ConeGeometry, THREE.MeshStandardMaterial>
-    | null = null;
+  private gumballHandle: THREE.Mesh<
+    THREE.ConeGeometry,
+    THREE.MeshStandardMaterial
+  > | null = null;
   private resizeAxisLine: THREE.Line<
     THREE.BufferGeometry,
     THREE.LineBasicMaterial
@@ -225,6 +229,24 @@ export class WallToolComponent extends Component {
     }
   }
 
+  setSelectedRoomSurfaceMaterial(
+    material: THREE.Material,
+    materialId?: string,
+  ): void {
+    if (this.selectedRoomSurface) {
+      this.selectedRoomSurface.setPreviewMaterial(null);
+      this.selectedRoomSurface.setCustomMaterial(material, materialId);
+      this.notify();
+    }
+  }
+
+  previewRoomSurfaceMaterial(material: THREE.Material | null): void {
+    if (this.selectedRoomSurface) {
+      this.selectedRoomSurface.setPreviewMaterial(material);
+      this.notify();
+    }
+  }
+
   setSelectedWallWidth(width: number): void {
     if (this.selectedWall && width > 0) {
       this.selectedWall.setWidth(width);
@@ -271,7 +293,10 @@ export class WallToolComponent extends Component {
   // Opening properties
   // --------------------------------
 
-  setSelectedOpeningGlassMaterial(material: THREE.Material, materialId?: string): void {
+  setSelectedOpeningGlassMaterial(
+    material: THREE.Material,
+    materialId?: string,
+  ): void {
     if (this.selectedOpening instanceof WindowMesh) {
       this.selectedOpening.setPreviewMaterial(null);
       this.selectedOpening.setGlassMaterial(material, materialId);
@@ -286,7 +311,10 @@ export class WallToolComponent extends Component {
     }
   }
 
-  setSelectedOpeningLeafMaterial(material: THREE.Material, materialId?: string): void {
+  setSelectedOpeningLeafMaterial(
+    material: THREE.Material,
+    materialId?: string,
+  ): void {
     if (this.selectedOpening instanceof DoorMesh) {
       this.selectedOpening.setPreviewMaterial(null);
       this.selectedOpening.setLeafMaterial(material, materialId);
@@ -301,8 +329,14 @@ export class WallToolComponent extends Component {
     }
   }
 
-  setSelectedOpeningFrameMaterial(material: THREE.Material, materialId?: string): void {
-    if (this.selectedOpening instanceof WindowMesh || this.selectedOpening instanceof DoorMesh) {
+  setSelectedOpeningFrameMaterial(
+    material: THREE.Material,
+    materialId?: string,
+  ): void {
+    if (
+      this.selectedOpening instanceof WindowMesh ||
+      this.selectedOpening instanceof DoorMesh
+    ) {
       this.selectedOpening.setFrameMaterial(material, materialId);
       this.notify();
     }
@@ -609,7 +643,11 @@ export class WallToolComponent extends Component {
       return false;
     }
 
-    const hits = this.raycastComponent.castObject(event, this.gumballHandle, false);
+    const hits = this.raycastComponent.castObject(
+      event,
+      this.gumballHandle,
+      false,
+    );
     return hits.length > 0;
   }
 
@@ -737,7 +775,8 @@ export class WallToolComponent extends Component {
         return;
       }
 
-      const node = this.pickResizeHandle(event) ?? this.pickWallEndHandle(event);
+      const node =
+        this.pickResizeHandle(event) ?? this.pickWallEndHandle(event);
       if (node) {
         this.activeResizeHandle = node;
         this.resizeError = null;
@@ -1096,6 +1135,10 @@ export class WallToolComponent extends Component {
         return object;
       }
 
+      if (object instanceof RoomSurfaceMesh) {
+        return object;
+      }
+
       if (object instanceof WallMesh && !object.isPreview) {
         return object;
       }
@@ -1161,7 +1204,7 @@ export class WallToolComponent extends Component {
 
   private setSelection(target: Selectable | null): void {
     const current: Selectable | null =
-      this.selectedOpening ?? this.selectedWall;
+      this.selectedOpening ?? this.selectedWall ?? this.selectedRoomSurface;
 
     if (current === target) return;
 
@@ -1169,6 +1212,8 @@ export class WallToolComponent extends Component {
 
     this.selectedWall = target instanceof WallMesh ? target : null;
     this.selectedOpening = target instanceof Opening ? target : null;
+    this.selectedRoomSurface =
+      target instanceof RoomSurfaceMesh ? target : null;
     this.openingEditError = null;
     this.resizeError = null;
     this.activeResizeHandle = null;
@@ -1188,7 +1233,8 @@ export class WallToolComponent extends Component {
   }
 
   private setHover(target: Selectable | null): void {
-    const current: Selectable | null = this.hoveredOpening ?? this.hoveredWall;
+    const current: Selectable | null =
+      this.hoveredOpening ?? this.hoveredWall ?? this.hoveredRoomSurface;
 
     if (current === target) return;
 
@@ -1198,6 +1244,7 @@ export class WallToolComponent extends Component {
 
     this.hoveredWall = target instanceof WallMesh ? target : null;
     this.hoveredOpening = target instanceof Opening ? target : null;
+    this.hoveredRoomSurface = target instanceof RoomSurfaceMesh ? target : null;
 
     if (target && !target.isSelected) {
       target.setHovered(true);

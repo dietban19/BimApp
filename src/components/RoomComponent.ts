@@ -8,6 +8,7 @@ import type { RoomBounds, RoomPoint } from '../types/Room';
 
 export interface RoomComponentOptions {
   showFloors?: boolean;
+  showRoofs?: boolean;
   showLabels?: boolean;
 }
 
@@ -19,6 +20,7 @@ export interface RoomInfo {
   perimeter: number;
   center: RoomPoint;
   bounds: RoomBounds;
+  height: number;
   walls: WallMesh[];
 }
 
@@ -35,6 +37,7 @@ export class RoomComponent extends Component {
   rooms: RoomInfo[] = [];
 
   showFloors: boolean;
+  showRoofs: boolean;
   showLabels: boolean;
 
   private wallTool!: WallToolComponent;
@@ -50,6 +53,7 @@ export class RoomComponent extends Component {
     super(world);
 
     this.showFloors = options.showFloors ?? true;
+    this.showRoofs = options.showRoofs ?? true;
     this.showLabels = options.showLabels ?? true;
   }
 
@@ -81,6 +85,14 @@ export class RoomComponent extends Component {
     this.notify();
   }
 
+  setShowRoofs(visible: boolean): void {
+    if (this.showRoofs === visible) return;
+
+    this.showRoofs = visible;
+    this.applyVisibility();
+    this.notify();
+  }
+
   setShowLabels(visible: boolean): void {
     if (this.showLabels === visible) return;
 
@@ -91,6 +103,10 @@ export class RoomComponent extends Component {
 
   toggleFloors(): void {
     this.setShowFloors(!this.showFloors);
+  }
+
+  toggleRoofs(): void {
+    this.setShowRoofs(!this.showRoofs);
   }
 
   toggleLabels(): void {
@@ -177,11 +193,14 @@ export class RoomComponent extends Component {
       keep.add(id);
 
       const name = `Room ${index + 1}`;
+      const roomHeight = Math.max(3, ...room.walls.map((wall) => wall.height));
+
       const options = {
         polygon: room.polygon,
         name,
         area: room.area,
         center: room.center,
+        height: roomHeight,
       };
 
       const existing = this.meshes.get(id);
@@ -191,6 +210,8 @@ export class RoomComponent extends Component {
       } else {
         const mesh = new RoomMesh(id, options);
         this.meshes.set(id, mesh);
+        this.world.meshes.add(mesh.floorSurface);
+        this.world.meshes.add(mesh.roofSurface);
         this.world.scene.add(mesh);
       }
 
@@ -201,6 +222,7 @@ export class RoomComponent extends Component {
         perimeter: room.perimeter,
         center: room.center,
         bounds: room.bounds,
+        height: roomHeight,
         walls: room.walls,
       });
     });
@@ -209,6 +231,8 @@ export class RoomComponent extends Component {
       if (keep.has(id)) continue;
 
       this.meshes.delete(id);
+      this.world.removeMesh(mesh.floorSurface);
+      this.world.removeMesh(mesh.roofSurface);
       this.world.scene.remove(mesh);
       mesh.dispose();
     }
@@ -222,6 +246,7 @@ export class RoomComponent extends Component {
   private applyVisibility(): void {
     for (const mesh of this.meshes.values()) {
       mesh.setFloorVisible(this.showFloors);
+      mesh.setRoofVisible(this.showRoofs);
       mesh.setLabelVisible(this.showLabels);
     }
   }
@@ -231,6 +256,8 @@ export class RoomComponent extends Component {
     this.unsubscribeWallTool = undefined;
 
     for (const mesh of this.meshes.values()) {
+      this.world.removeMesh(mesh.floorSurface);
+      this.world.removeMesh(mesh.roofSurface);
       this.world.scene.remove(mesh);
       mesh.dispose();
     }

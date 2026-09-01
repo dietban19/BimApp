@@ -8,10 +8,14 @@ export interface RoomMeshOptions {
   name: string;
   area: number;
   center: RoomPoint;
+  height: number;
 }
 
 /** Floor slab of a detected room, drawn just above the grid. */
 const FLOOR_HEIGHT = 0.004;
+const FLOOR_THICKNESS = 0.08;
+const ROOF_THICKNESS = 0.08;
+const ROOF_HEIGHT_OFFSET = 0.02;
 
 /** Outline offset above the slab, in the mesh's local frame. */
 const OUTLINE_OFFSET = 0.004;
@@ -25,6 +29,7 @@ const LABEL_MAX_WIDTH = 2.6;
 const LABEL_MIN_WIDTH = 0.9;
 
 const FLOOR_COLOR = 0x38bdf8;
+const ROOF_COLOR = 0xe2e8f0;
 const OUTLINE_COLOR = 0x7dd3fc;
 
 /**
@@ -36,8 +41,46 @@ const OUTLINE_COLOR = 0x7dd3fc;
  * The mesh is built in the XY plane and rotated onto the ground, so a room
  * point (x, z) becomes the local point (x, -z).
  */
-export class RoomMesh extends BaseMesh {
+export class RoomSurfaceMesh extends BaseMesh {
   readonly roomId: string;
+  readonly surfaceType: 'floor' | 'roof';
+
+  constructor(
+    roomId: string,
+    surfaceType: 'floor' | 'roof',
+    options: RoomMeshOptions,
+  ) {
+    const material = new THREE.MeshStandardMaterial({
+      color: surfaceType === 'floor' ? FLOOR_COLOR : ROOF_COLOR,
+      roughness: 1,
+      metalness: 0,
+      side: THREE.DoubleSide,
+      depthWrite: true,
+    });
+
+    super(RoomMesh.createGeometry(options.polygon), material);
+
+    this.roomId = roomId;
+    this.surfaceType = surfaceType;
+    this.castShadow = false;
+    this.receiveShadow = true;
+    this.renderOrder = 1;
+    this.rotation.x = -Math.PI / 2;
+
+    if (surfaceType === 'floor') {
+      this.position.y = FLOOR_HEIGHT + FLOOR_THICKNESS * 0.5;
+    } else {
+      this.position.y =
+        options.height + ROOF_HEIGHT_OFFSET + ROOF_THICKNESS * 0.5;
+    }
+  }
+}
+
+export class RoomMesh extends THREE.Group {
+  readonly roomId: string;
+
+  readonly floorSurface: RoomSurfaceMesh;
+  readonly roofSurface: RoomSurfaceMesh;
 
   private outline: THREE.LineLoop<
     THREE.BufferGeometry,
@@ -48,30 +91,17 @@ export class RoomMesh extends BaseMesh {
   private labelTexture: THREE.CanvasTexture;
   private labelCanvas: HTMLCanvasElement;
   private labelText = '';
-  private readonly floorMaterial: THREE.MeshStandardMaterial;
 
   constructor(roomId: string, options: RoomMeshOptions) {
-    const material = new THREE.MeshStandardMaterial({
-      color: FLOOR_COLOR,
-      transparent: true,
-      opacity: 0.18,
-      roughness: 1,
-      metalness: 0,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-    });
-
-    super(RoomMesh.createGeometry(options.polygon), material);
-
-    this.castShadow = false;
-    this.receiveShadow = true;
+    super();
 
     this.roomId = roomId;
-    this.floorMaterial = material;
 
-    this.rotation.x = -Math.PI / 2;
-    this.position.y = FLOOR_HEIGHT;
-    this.renderOrder = 1;
+    this.floorSurface = new RoomSurfaceMesh(roomId, 'floor', options);
+    this.roofSurface = new RoomSurfaceMesh(roomId, 'roof', options);
+
+    this.add(this.floorSurface);
+    this.add(this.roofSurface);
 
     this.outline = new THREE.LineLoop(
       RoomMesh.createOutlineGeometry(options.polygon),
@@ -81,6 +111,8 @@ export class RoomMesh extends BaseMesh {
         opacity: 0.9,
       }),
     );
+    this.outline.rotation.x = -Math.PI / 2;
+    this.outline.position.y = FLOOR_HEIGHT + 0.01;
     this.outline.renderOrder = 2;
     this.add(this.outline);
 
@@ -109,11 +141,18 @@ export class RoomMesh extends BaseMesh {
    * Re-uses the same scene object when a room only changed shape or size.
    */
   update(options: RoomMeshOptions): void {
-    this.geometry.dispose();
-    this.geometry = RoomMesh.createGeometry(options.polygon);
+    this.floorSurface.geometry.dispose();
+    this.floorSurface.geometry = RoomMesh.createGeometry(options.polygon);
+    this.floorSurface.position.y = FLOOR_HEIGHT + FLOOR_THICKNESS * 0.5;
+
+    this.roofSurface.geometry.dispose();
+    this.roofSurface.geometry = RoomMesh.createGeometry(options.polygon);
+    this.roofSurface.position.y =
+      options.height + ROOF_HEIGHT_OFFSET + ROOF_THICKNESS * 0.5;
 
     this.outline.geometry.dispose();
     this.outline.geometry = RoomMesh.createOutlineGeometry(options.polygon);
+    this.outline.position.y = FLOOR_HEIGHT + 0.01;
 
     this.applyLabel(options);
   }
@@ -123,8 +162,12 @@ export class RoomMesh extends BaseMesh {
    * scene graph, so the label can still be shown on its own.
    */
   setFloorVisible(visible: boolean): void {
-    this.floorMaterial.visible = visible;
+    this.floorSurface.visible = visible;
     this.outline.visible = visible;
+  }
+
+  setRoofVisible(visible: boolean): void {
+    this.roofSurface.visible = visible;
   }
 
   setLabelVisible(visible: boolean): void {
@@ -135,9 +178,7 @@ export class RoomMesh extends BaseMesh {
   // Geometry
   // --------------------------------
 
-  private static createGeometry(
-    polygon: readonly RoomPoint[],
-  ): THREE.BufferGeometry {
+  static createGeometry(polygon: readonly RoomPoint[]): THREE.BufferGeometry {
     if (polygon.length < 3) {
       return new THREE.BufferGeometry();
     }
@@ -155,7 +196,7 @@ export class RoomMesh extends BaseMesh {
     return new THREE.ShapeGeometry(shape);
   }
 
-  private static createOutlineGeometry(
+  static createOutlineGeometry(
     polygon: readonly RoomPoint[],
   ): THREE.BufferGeometry {
     const points = polygon.map(
@@ -236,16 +277,20 @@ export class RoomMesh extends BaseMesh {
     this.labelTexture.needsUpdate = true;
   }
 
-  override dispose(): void {
+  dispose(): void {
     this.remove(this.outline);
     this.outline.geometry.dispose();
     this.outline.material.dispose();
+
+    this.remove(this.floorSurface);
+    this.floorSurface.dispose();
+
+    this.remove(this.roofSurface);
+    this.roofSurface.dispose();
 
     this.remove(this.label);
     this.label.material.map = null;
     this.label.material.dispose();
     this.labelTexture.dispose();
-
-    super.dispose();
   }
 }

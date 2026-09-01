@@ -88,8 +88,12 @@ function App() {
   }, []);
 
   return (
-    <main className="app">
-      <div ref={containerRef} className="three-container" />
+    <main className="app-shell">
+      <div
+        ref={containerRef}
+        className="three-container"
+        aria-label="3D architectural workspace"
+      />
       <UIOverlay wallTool={wallTool} roomTool={roomTool} />
     </main>
   );

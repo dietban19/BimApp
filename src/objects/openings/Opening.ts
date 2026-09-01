@@ -40,8 +40,6 @@ export abstract class Opening extends BaseMesh {
 
   private readonly decorations: THREE.Object3D[] = [];
 
-  private previewMaterial: THREE.MeshStandardMaterial | null = null;
-
   protected constructor(params: OpeningParams, isPreview: boolean) {
     super();
 
@@ -171,9 +169,7 @@ export abstract class Opening extends BaseMesh {
     wallThickness: number,
   ): THREE.BufferGeometry;
 
-  protected abstract createDecorations(
-    wallThickness: number,
-  ): THREE.Object3D[];
+  protected abstract createDecorations(wallThickness: number): THREE.Object3D[];
 
   /**
    * Positions the opening inside its wall's local frame.
@@ -274,7 +270,11 @@ export abstract class Opening extends BaseMesh {
    * Colours a preview green or red depending on whether it can be placed.
    */
   setPreviewValid(valid: boolean): void {
-    this.previewMaterial?.color.setHex(
+    if (!(this.previewMaterial instanceof THREE.MeshStandardMaterial)) {
+      return;
+    }
+
+    this.previewMaterial.color.setHex(
       valid ? PREVIEW_VALID_COLOR : PREVIEW_INVALID_COLOR,
     );
   }
